@@ -47,15 +47,12 @@ class AgentWithProgress(AgentComponent):
             )
 
     outputs = [
-        Output(
-            display_name="Response",
-            name="response",
-            method="message_response_with_progress",
-        ),
+        Output(display_name="Response", name="response", method="message_response_with_progress", group_outputs=True),
         Output(
             display_name="Progress Manager",
             name="progress_manager_output",
             method="get_progress_manager",
+            group_outputs=True,
         ),
     ]
 
