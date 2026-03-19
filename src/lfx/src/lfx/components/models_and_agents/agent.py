@@ -445,19 +445,67 @@ class AgentComponent(ToolCallingAgentComponent):
 
     async def get_memory_data(self):
         # TODO: This is a temporary fix to avoid message duplication. We should develop a function for this.
+        session_id = self.graph.session_id
+        print(f"\n{'=' * 80}")
+        print(f"[Standard Agent {self.display_name}] RETRIEVING MEMORY")
+        print(f"[Standard Agent] Session ID: {session_id}")
+        print(f"[Standard Agent] Context ID: {self.context_id}")
+        print(f"[Standard Agent] n_messages: {self.n_messages}")
+
         messages = (
             await MemoryComponent(**self.get_base_args())
             .set(
-                session_id=self.graph.session_id,
+                session_id=session_id,
                 context_id=self.context_id,
                 order="Ascending",
                 n_messages=self.n_messages,
             )
             .retrieve_messages()
         )
-        return [
+
+        print(f"[Standard Agent] Retrieved {len(messages)} messages from memory")
+        print("\n[Standard Agent] FULL MESSAGE CONTENT:")
+        for i, msg in enumerate(messages):
+            print(f"\n--- Message {i + 1} ---")
+            print(f"Type: {type(msg).__name__}")
+            if hasattr(msg, "sender"):
+                print(f"Sender: {msg.sender}")
+            if hasattr(msg, "text"):
+                print(f"Text length: {len(msg.text)} chars")
+                print(f"Full text:\n{msg.text}")
+            if hasattr(msg, "id"):
+                print(f"ID: {msg.id}")
+            # Check content_blocks
+            if hasattr(msg, "content_blocks"):
+                print(f"Content blocks: {len(msg.content_blocks)} blocks")
+                for j, block in enumerate(msg.content_blocks):
+                    print(f"  Block {j + 1}: {type(block).__name__}")
+                    if hasattr(block, "title"):
+                        print(f"    Title: {block.title}")
+                    if hasattr(block, "contents"):
+                        print(f"    Contents: {len(block.contents)} items")
+                        for k, content in enumerate(block.contents):
+                            print(f"      Content {k + 1}: {type(content).__name__}")
+                            if hasattr(content, "type"):
+                                print(f"        Type: {content.type}")
+                            if hasattr(content, "name"):
+                                print(f"        Name: {content.name}")
+                            if hasattr(content, "tool_input"):
+                                print(f"        Tool Input: {str(content.tool_input)[:200]}...")
+                            if hasattr(content, "output"):
+                                output_str = str(content.output) if content.output else "None"
+                                print(f"        Output length: {len(output_str)} chars")
+                                print(f"        Output preview: {output_str[:500]}...")
+            # Show all attributes for debugging
+            print(f"All attributes: {[attr for attr in dir(msg) if not attr.startswith('_')]}")
+
+        filtered = [
             message for message in messages if getattr(message, "id", None) != getattr(self.input_value, "id", None)
         ]
+        print(f"\n[Standard Agent] After filtering current input: {len(filtered)} messages")
+        print(f"{'=' * 80}\n")
+
+        return filtered
 
     def update_input_types(self, build_config: dotdict) -> dotdict:
         """Update input types for all fields in build_config."""
