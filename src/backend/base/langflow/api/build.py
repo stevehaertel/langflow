@@ -197,7 +197,8 @@ async def create_flow_response(
                     break
                 get_time = time.time()
                 yield value.decode("utf-8")
-                await logger.adebug(f"Event {event_id} consumed in {get_time - put_time:.4f}s")
+                # Commented out to reduce log noise during testing
+                # await logger.adebug(f"Event {event_id} consumed in {get_time - put_time:.4f}s")
             except Exception as exc:  # noqa: BLE001
                 await logger.aexception(f"Error consuming event: {exc}")
                 break

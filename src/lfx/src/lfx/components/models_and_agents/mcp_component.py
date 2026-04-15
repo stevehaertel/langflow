@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 from langchain_core.tools import StructuredTool  # noqa: TC002
 
@@ -648,7 +650,52 @@ class MCPToolsComponent(ComponentWithCache):
 
                 unflattened_kwargs = maybe_unflatten_dict(kwargs)
 
-                output = await exec_tool.coroutine(**unflattened_kwargs)
+                # Only create progress callback if streaming is enabled
+                progress_callback: Callable[[dict[str, Any]], None] | None = None
+                if self._should_stream_progress():
+
+                    def _progress_callback(notification: dict[str, Any]) -> None:
+                        """Forward progress notifications to event manager."""
+                        print(f"[MCP COMPONENT PROGRESS] Callback received notification: {notification}")
+                        # Extract message from progress notification
+                        message_text = notification.get("message", "")
+                        print(
+                            f"[MCP COMPONENT PROGRESS] Extracted message: {message_text[:100] if message_text else 'None'}"
+                        )
+                        if message_text:
+                            # Create a Message object and send it to the chat
+                            from lfx.schema.message import Message
+
+                            progress_message = Message(
+                                text=f"[MCP Tool Progress] {message_text}",
+                                sender="Machine",
+                                sender_name="MCP Tool",
+                                session_id=self.session_id if hasattr(self, "session_id") else "",
+                            )
+
+                            print("[MCP COMPONENT PROGRESS] Created progress message, attempting to send...")
+                            # Send the message asynchronously
+                            import asyncio
+
+                            try:
+                                # Try to send the message if we have the method
+                                if hasattr(self, "send_message"):
+                                    print("[MCP COMPONENT PROGRESS] Calling send_message...")
+                                    asyncio.create_task(self.send_message(progress_message))
+                                    print("[MCP COMPONENT PROGRESS] Created async task for send_message")
+                            except Exception as e:
+                                print(f"[MCP COMPONENT PROGRESS] Error sending message: {e}")
+                                # Fallback to event manager if send_message fails
+                                if self._event_manager:
+                                    print("[MCP COMPONENT PROGRESS] Falling back to event manager")
+                                    self._event_manager.on_message(
+                                        data={"text": message_text, "type": "progress", "source": "mcp_tool"}
+                                    )
+
+                    progress_callback = _progress_callback
+
+                # Execute tool with progress callback (None if streaming disabled)
+                output = await exec_tool.coroutine(**unflattened_kwargs, progress_callback=progress_callback)
                 tool_content = []
                 for item in output.content:
                     item_dict = item.model_dump()
@@ -678,6 +725,26 @@ class MCPToolsComponent(ComponentWithCache):
             except json.JSONDecodeError:
                 return item_dict
         return item_dict
+
+    def _should_stream_progress(self) -> bool:
+        """Check if progress streaming is enabled via environment variable.
+
+        Returns:
+            bool: True if streaming is enabled, False otherwise
+        """
+        try:
+            from lfx.services.deps import get_settings_service
+
+            settings_service = get_settings_service()
+            if settings_service and hasattr(settings_service, "settings"):
+                result = settings_service.settings.mcp_server_stream_messages_in_progress
+                print(f"[MCP DEBUG] _should_stream_progress() = {result}")
+                return result
+            print("[MCP DEBUG] _should_stream_progress() = False (no settings service)")
+            return False
+        except (AttributeError, ImportError) as e:
+            print(f"[MCP DEBUG] _should_stream_progress() = False (exception: {e})")
+            return False
 
     def _get_session_context(self) -> str | None:
         """Get the Langflow session ID for MCP session caching."""

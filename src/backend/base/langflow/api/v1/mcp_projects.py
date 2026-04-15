@@ -27,6 +27,7 @@ from mcp import types
 from mcp.server import NotificationOptions, Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from pydantic import AnyUrl
 from sqlalchemy.orm import selectinload
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -1236,20 +1237,32 @@ class ProjectMCPServer:
             return await handle_list_resources(project_id=self.project_id)
 
         @self.server.read_resource()
-        async def handle_read_project_resource(uri: str) -> bytes:
+        async def handle_read_project_resource(uri: AnyUrl) -> bytes:
             """Handle resource read requests for this specific project."""
-            return await handle_read_resource(uri=uri)
+            return await handle_read_resource(uri=str(uri))
 
         @self.server.call_tool()
         @handle_mcp_errors
         async def handle_call_project_tool(name: str, arguments: dict) -> list[types.TextContent]:
             """Handle tool execution requests for this specific project."""
+            # Extract progress token from arguments._meta (MCP spec location)
+            progress_token = None
+            if "_meta" in arguments:
+                meta = arguments.get("_meta", {})
+                progress_token = meta.get("progressToken")
+                print(f"[MCP HANDLER DEBUG] Found _meta in arguments with progressToken: {progress_token}")
+                # Remove _meta from arguments before passing to flow
+                arguments = {k: v for k, v in arguments.items() if k != "_meta"}
+            else:
+                print("[MCP HANDLER DEBUG] No _meta found in arguments")
+
             return await handle_call_tool(
                 name=name,
                 arguments=arguments,
                 server=self.server,
                 project_id=self.project_id,
                 is_action=True,
+                progress_token=progress_token,
             )
 
     async def ensure_session_manager_running(self) -> None:

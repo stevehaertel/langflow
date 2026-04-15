@@ -9,13 +9,11 @@ Plugins must use these tables via the models exported from
 """
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy import Column, ForeignKey, Index
 from sqlmodel import Field, SQLModel
-
-from langflow.schema.serialize import UUIDstr
 
 
 class SSOUserProfile(SQLModel, table=True):  # type: ignore[call-arg]
@@ -25,8 +23,8 @@ class SSOUserProfile(SQLModel, table=True):  # type: ignore[call-arg]
     # Use Index(unique=True) to match migration (create_index); avoids model/DB mismatch.
     __table_args__ = (Index("uq_sso_user_profile_provider_user", "sso_provider", "sso_user_id", unique=True),)
 
-    id: UUIDstr = Field(default_factory=uuid4, primary_key=True)
-    user_id: UUIDstr = Field(
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    user_id: UUID = Field(
         sa_column=Column(
             sa.Uuid(),
             ForeignKey("user.id", ondelete="CASCADE"),
@@ -48,7 +46,7 @@ class SSOConfig(SQLModel, table=True):  # type: ignore[call-arg]
 
     __tablename__ = "sso_config"
 
-    id: UUIDstr = Field(default_factory=uuid4, primary_key=True)
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
     provider: str = Field(description="oidc, saml, ldap")
     provider_name: str = Field()
     enabled: bool = Field(default=True)
@@ -67,7 +65,7 @@ class SSOConfig(SQLModel, table=True):  # type: ignore[call-arg]
     issuer: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    created_by: UUIDstr | None = Field(
+    created_by: UUID | None = Field(
         default=None,
         sa_column=Column(
             sa.Uuid(),

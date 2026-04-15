@@ -7,7 +7,6 @@ from pydantic import field_validator
 from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlmodel import Column, DateTime, Field, Relationship, SQLModel, func
 
-from langflow.schema.serialize import UUIDstr
 from langflow.services.database.utils import validate_non_empty_string
 
 if TYPE_CHECKING:
@@ -27,14 +26,14 @@ class Deployment(SQLModel, table=True):  # type: ignore[call-arg]
 
     id: UUID | None = Field(default_factory=uuid4, primary_key=True)
     resource_key: str = Field(index=True)
-    user_id: UUIDstr = Field(
+    user_id: UUID = Field(
         sa_column=Column(sa.Uuid(), ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True)
     )
     # "project" is represented by a Folder row in the existing schema.
-    project_id: UUIDstr = Field(
+    project_id: UUID = Field(
         sa_column=Column(sa.Uuid(), ForeignKey("folder.id", ondelete="CASCADE"), nullable=False, index=True)
     )
-    deployment_provider_account_id: UUIDstr = Field(
+    deployment_provider_account_id: UUID = Field(
         sa_column=Column(
             sa.Uuid(), ForeignKey("deployment_provider_account.id", ondelete="CASCADE"), nullable=False, index=True
         )

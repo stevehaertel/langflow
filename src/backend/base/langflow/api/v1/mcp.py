@@ -9,6 +9,7 @@ from mcp import types
 from mcp.server import NotificationOptions, Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from pydantic import AnyUrl
 
 from langflow.api.utils import CurrentActiveMCPUser, raise_error_if_astra_cloud_env
 from langflow.api.v1.mcp_utils import (
@@ -37,9 +38,9 @@ async def handle_global_resources():
 
 
 @server.read_resource()
-async def handle_global_read_resource(uri: str) -> bytes:
+async def handle_global_read_resource(uri: AnyUrl) -> bytes:
     """Handle resource read requests for global MCP server."""
-    return await handle_read_resource(uri)
+    return await handle_read_resource(str(uri))
 
 
 @server.list_tools()
@@ -52,7 +53,41 @@ async def handle_global_tools():
 @handle_mcp_errors
 async def handle_global_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     """Handle tool execution requests for global MCP server."""
-    return await handle_call_tool(name, arguments, server)
+    import json
+
+    print("[MCP HANDLER DEBUG] Received call_tool request")
+    print(f"[MCP HANDLER DEBUG] Tool name: {name}")
+    print(f"[MCP HANDLER DEBUG] Arguments: {json.dumps(arguments, indent=2)}")
+
+    # Check server.request_context
+    if server.request_context:
+        print("[MCP HANDLER DEBUG] request_context exists")
+        print(f"[MCP HANDLER DEBUG] request_context.meta: {server.request_context.meta}")
+        if server.request_context.meta:
+            print(
+                f"[MCP HANDLER DEBUG] request_context.meta dict: {server.request_context.meta.model_dump() if hasattr(server.request_context.meta, 'model_dump') else vars(server.request_context.meta)}"
+            )
+    else:
+        print("[MCP HANDLER DEBUG] request_context is None")
+
+    # Extract progress token from arguments._meta (MCP spec location)
+    progress_token = None
+    if "_meta" in arguments:
+        meta = arguments.get("_meta", {})
+        progress_token = meta.get("progressToken")
+        print(f"[MCP HANDLER DEBUG] Extracted progress_token from arguments._meta: {progress_token}")
+        # Remove _meta from arguments before passing to flow
+        arguments = {k: v for k, v in arguments.items() if k != "_meta"}
+    else:
+        print("[MCP HANDLER DEBUG] No _meta in arguments")
+
+    # Fallback: Try to get progress token from server.request_context.meta
+    # This is where the MCP SDK server stores it when using HTTP/SSE transport
+    if progress_token is None and server.request_context and server.request_context.meta:
+        progress_token = server.request_context.meta.progressToken
+        print(f"[MCP HANDLER DEBUG] Using progress_token from request_context.meta: {progress_token}")
+
+    return await handle_call_tool(name, arguments, server, progress_token=progress_token)
 
 
 ########################################################

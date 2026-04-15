@@ -304,6 +304,8 @@ class Settings(BaseSettings):
     """If set to False, Langflow will not enable the MCP server."""
     mcp_server_enable_progress_notifications: bool = False
     """If set to False, Langflow will not send progress notifications in the MCP server."""
+    mcp_server_stream_messages_in_progress: bool = False
+    """If set to True, chat messages from flows will be streamed via MCP progress notifications."""
 
     # Add projects to MCP servers automatically on creation
     add_projects_to_mcp_servers: bool = True

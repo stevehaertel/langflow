@@ -7,7 +7,6 @@ from pydantic import field_validator
 from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlmodel import Column, DateTime, Field, Relationship, SQLModel, func
 
-from langflow.schema.serialize import UUIDstr
 from langflow.services.database.utils import (
     normalize_string_or_none,
     validate_non_empty_string,
@@ -30,7 +29,7 @@ class DeploymentProviderAccount(SQLModel, table=True):  # type: ignore[call-arg]
     )
 
     id: UUID | None = Field(default_factory=uuid4, primary_key=True)
-    user_id: UUIDstr = Field(
+    user_id: UUID = Field(
         sa_column=Column(sa.Uuid(), ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True)
     )
     # provider_tenant_id participates in a unique constraint. When NULL,

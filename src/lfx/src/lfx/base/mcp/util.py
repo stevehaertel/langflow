@@ -1130,12 +1130,18 @@ class MCPStdioClient:
         session_manager = self._get_session_manager()
         return await session_manager.get_session(self._session_context, self._connection_params, "stdio")
 
-    async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+    async def run_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> Any:
         """Run a tool with the given arguments using context-specific session.
 
         Args:
             tool_name: Name of the tool to run
             arguments: Dictionary of arguments to pass to the tool
+            progress_callback: Optional callback for progress notifications
 
         Returns:
             The result of the tool execution
@@ -1164,10 +1170,44 @@ class MCPStdioClient:
                 # Get or create persistent session
                 session = await self._get_or_create_session()
 
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, arguments=arguments),
-                    timeout=30.0,  # 30 second timeout
-                )
+                # Set up progress tracking if callback provided
+                if progress_callback:
+                    # Get the request_id that will be used for this request
+                    progress_token = session._request_id
+                    await logger.adebug(f"Using progress_token = request_id: {progress_token}")
+
+                    # Create progress handler that matches MCP SDK signature
+                    async def progress_handler(progress: float, total: float | None = None, message: str | None = None):
+                        """Handle progress notifications from MCP server."""
+                        try:
+                            # Build progress data including the message field
+                            progress_data = {
+                                "progress": progress,
+                                "total": total if total is not None else 100,
+                            }
+                            # Add message if provided
+                            if message:
+                                progress_data["message"] = message
+                            # Call the user's callback
+                            progress_callback(progress_data)
+                        except Exception as e:
+                            await logger.aerror(f"Error in progress callback: {e}")
+
+                    # Pass progressToken through the meta parameter
+                    result = await asyncio.wait_for(
+                        session.call_tool(
+                            tool_name,
+                            arguments=arguments,
+                            progress_callback=progress_handler,
+                            meta={"progressToken": progress_token},
+                        ),
+                        timeout=30.0,  # 30 second timeout
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        session.call_tool(tool_name, arguments=arguments),
+                        timeout=30.0,  # 30 second timeout
+                    )
             except Exception as e:
                 current_error_type = type(e).__name__
                 await logger.awarning(f"Tool '{tool_name}' failed on attempt {attempt + 1}: {current_error_type} - {e}")
@@ -1402,12 +1442,18 @@ class MCPStreamableHttpClient:
             # DELETE is advisory—log and continue
             logger.debug(f"Unable to send session DELETE to '{url}': {e}")
 
-    async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+    async def run_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> Any:
         """Run a tool with the given arguments using context-specific session.
 
         Args:
             tool_name: Name of the tool to run
             arguments: Dictionary of arguments to pass to the tool
+            progress_callback: Optional callback for progress notifications
 
         Returns:
             The result of the tool execution
@@ -1436,10 +1482,44 @@ class MCPStreamableHttpClient:
                 # Get or create persistent session
                 session = await self._get_or_create_session()
 
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, arguments=arguments),
-                    timeout=30.0,  # 30 second timeout
-                )
+                # Set up progress tracking if callback provided
+                if progress_callback:
+                    # Get the request_id that will be used for this request
+                    progress_token = session._request_id
+                    await logger.adebug(f"Using progress_token = request_id: {progress_token}")
+
+                    # Create progress handler that matches MCP SDK signature
+                    async def progress_handler(progress: float, total: float | None = None, message: str | None = None):
+                        """Handle progress notifications from MCP server."""
+                        try:
+                            # Build progress data including the message field
+                            progress_data = {
+                                "progress": progress,
+                                "total": total if total is not None else 100,
+                            }
+                            # Add message if provided
+                            if message:
+                                progress_data["message"] = message
+                            # Call the user's callback
+                            progress_callback(progress_data)
+                        except Exception as e:
+                            await logger.aerror(f"Error in progress callback: {e}")
+
+                    # Pass progressToken through the meta parameter
+                    result = await asyncio.wait_for(
+                        session.call_tool(
+                            tool_name,
+                            arguments=arguments,
+                            progress_callback=progress_handler,
+                            meta={"progressToken": progress_token},
+                        ),
+                        timeout=30.0,  # 30 second timeout
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        session.call_tool(tool_name, arguments=arguments),
+                        timeout=30.0,  # 30 second timeout
+                    )
             except Exception as e:
                 current_error_type = type(e).__name__
                 await logger.awarning(f"Tool '{tool_name}' failed on attempt {attempt + 1}: {current_error_type} - {e}")
