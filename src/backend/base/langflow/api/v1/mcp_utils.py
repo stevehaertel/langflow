@@ -451,7 +451,7 @@ async def handle_read_resource(uri: str) -> bytes:
 
 
 async def handle_call_tool(
-    name: str, arguments: dict, server, project_id=None, *, is_action=False, progress_token=None
+    name: str, arguments: dict, server, project_id=None, *, is_action=False, progress_token=None, request_context=None
 ) -> list[types.TextContent]:
     """Handle tool execution requests.
 
@@ -462,6 +462,7 @@ async def handle_call_tool(
         project_id: Optional project ID to filter flows by project
         is_action: Whether to use action name for flow lookup
         progress_token: Optional progress token passed from the handler
+        request_context: ServerRequestContext from the new SDK (replaces server.request_context)
     """
     mcp_config = get_mcp_config()
     if mcp_config.enable_progress_notifications is None:
@@ -497,13 +498,13 @@ async def handle_call_tool(
         if token is None:
             if "_meta" in arguments and isinstance(arguments["_meta"], dict):
                 token = arguments["_meta"].get("progressToken")
-            elif server.request_context and server.request_context.meta is not None:
-                token = server.request_context.meta.progressToken
+            elif request_context and request_context.meta is not None:
+                token = request_context.meta.progressToken
 
         # Initial progress notification
-        if mcp_config.enable_progress_notifications and token is not None:
-            await server.request_context.session.send_progress_notification(
-                progress_token=token, progress=0.0, total=1.0, related_request_id=server.request_context.request_id
+        if mcp_config.enable_progress_notifications and token is not None and request_context:
+            await request_context.session.send_progress_notification(
+                progress_token=token, progress=0.0, total=1.0, related_request_id=request_context.request_id
             )
 
         conversation_id = str(uuid4())
@@ -515,21 +516,21 @@ async def handle_call_tool(
             try:
                 progress = 0.0
                 while True:
-                    await server.request_context.session.send_progress_notification(
+                    await request_context.session.send_progress_notification(
                         progress_token=prog_token,
                         progress=min(0.9, progress),
                         total=1.0,
-                        related_request_id=server.request_context.request_id,
+                        related_request_id=request_context.request_id,
                     )
                     progress += 0.1
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 if mcp_config.enable_progress_notifications:
-                    await server.request_context.session.send_progress_notification(
+                    await request_context.session.send_progress_notification(
                         progress_token=prog_token,
                         progress=1.0,
                         total=1.0,
-                        related_request_id=server.request_context.request_id,
+                        related_request_id=request_context.request_id,
                     )
                 raise
 
@@ -543,20 +544,18 @@ async def handle_call_tool(
             print("[MCP SERVER DEBUG] Full arguments object:")
             print(json.dumps(arguments, indent=2, default=str))
             print(f"[MCP SERVER DEBUG] token={token}")
-            print("[MCP SERVER DEBUG] Full server.request_context:")
-            if server.request_context:
+            print("[MCP SERVER DEBUG] Full request_context:")
+            if request_context:
                 try:
                     # Try to serialize the entire request_context
                     context_dict = (
-                        vars(server.request_context)
-                        if hasattr(server.request_context, "__dict__")
-                        else str(server.request_context)
+                        vars(request_context) if hasattr(request_context, "__dict__") else str(request_context)
                     )
                     print(json.dumps(context_dict, indent=2, default=str))
                 except Exception as e:
                     print(f"  Could not serialize request_context: {e}")
-                    print(f"  request_context type: {type(server.request_context)}")
-                    print(f"  request_context: {server.request_context}")
+                    print(f"  request_context type: {type(request_context)}")
+                    print(f"  request_context: {request_context}")
             else:
                 print("  No request_context available")
 
@@ -575,8 +574,8 @@ async def handle_call_tool(
                 print("[MCP SERVER DEBUG] Creating MessageStreamingEventManager...")
                 event_manager = MessageStreamingEventManager(
                     progress_token=token,
-                    session=server.request_context.session,
-                    request_id=server.request_context.request_id,
+                    session=request_context.session,
+                    request_id=request_context.request_id,
                 )
                 print("[MCP SERVER DEBUG] MessageStreamingEventManager created successfully")
                 await logger.adebug("Created MessageStreamingEventManager for progress notifications")
@@ -629,10 +628,11 @@ async def handle_call_tool(
         except Exception:
             if (
                 mcp_config.enable_progress_notifications
-                and server.request_context.meta is not None
-                and (error_token := server.request_context.meta.progressToken)
+                and request_context
+                and request_context.meta is not None
+                and (error_token := request_context.meta.progressToken)
             ):
-                await server.request_context.session.send_progress_notification(
+                await request_context.session.send_progress_notification(
                     progress_token=error_token, progress=1.0, total=1.0
                 )
             raise

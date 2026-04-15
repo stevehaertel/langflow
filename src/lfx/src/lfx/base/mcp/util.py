@@ -19,7 +19,7 @@ from anyio import ClosedResourceError
 from httpx import codes as httpx_codes
 from langchain_core.tools import StructuredTool
 from mcp import ClientSession
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel
 
 from lfx.log.logger import logger
@@ -308,6 +308,9 @@ def _handle_tool_validation_error(
 
 def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -> Callable[..., Awaitable]:
     async def tool_coroutine(*args, **kwargs):
+        # Extract progress_callback before processing other arguments
+        progress_callback = kwargs.pop("progress_callback", None)
+
         # Get field names from the model (preserving order)
         field_names = list(arg_schema.model_fields.keys())
         provided_args = {}
@@ -327,7 +330,9 @@ def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -
             _handle_tool_validation_error(e, tool_name, provided_args, arg_schema)
 
         try:
-            return await client.run_tool(tool_name, arguments=validated.model_dump())
+            return await client.run_tool(
+                tool_name, arguments=validated.model_dump(), progress_callback=progress_callback
+            )
         except Exception as e:
             await logger.aerror(f"Tool '{tool_name}' execution failed: {e}")
             # Re-raise with more context
@@ -339,6 +344,9 @@ def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -
 
 def create_tool_func(tool_name: str, arg_schema: type[BaseModel], client) -> Callable[..., str]:
     def tool_func(*args, **kwargs):
+        # Extract progress_callback before processing other arguments
+        progress_callback = kwargs.pop("progress_callback", None)
+
         field_names = list(arg_schema.model_fields.keys())
         provided_args = {}
         for i, arg in enumerate(args):
@@ -354,7 +362,9 @@ def create_tool_func(tool_name: str, arg_schema: type[BaseModel], client) -> Cal
             _handle_tool_validation_error(e, tool_name, provided_args, arg_schema)
 
         try:
-            return run_until_complete(client.run_tool(tool_name, arguments=validated.model_dump()))
+            return run_until_complete(
+                client.run_tool(tool_name, arguments=validated.model_dump(), progress_callback=progress_callback)
+            )
         except Exception as e:
             logger.error(f"Tool '{tool_name}' execution failed: {e}")
             # Re-raise with more context
@@ -1170,12 +1180,19 @@ class MCPStdioClient:
                 # Get or create persistent session
                 session = await self._get_or_create_session()
 
+                # ALWAYS set up progress token (even without callback)
+                # Get the request_id that will be used for this request
+                progress_token = session._request_id
+                await logger.adebug(f"[UTIL.PY DEBUG] Using progress_token = request_id: {progress_token}")
+                print(f"[UTIL.PY DEBUG] Using progress_token = request_id: {progress_token}")
+
+                # Create meta dict with progressToken
+                meta_dict = {"progressToken": progress_token}
+                print(f"[UTIL.PY DEBUG] About to call session.call_tool with meta={meta_dict}")
+                await logger.adebug(f"[UTIL.PY DEBUG] About to call session.call_tool with meta={meta_dict}")
+
                 # Set up progress tracking if callback provided
                 if progress_callback:
-                    # Get the request_id that will be used for this request
-                    progress_token = session._request_id
-                    await logger.adebug(f"Using progress_token = request_id: {progress_token}")
-
                     # Create progress handler that matches MCP SDK signature
                     async def progress_handler(progress: float, total: float | None = None, message: str | None = None):
                         """Handle progress notifications from MCP server."""
@@ -1193,21 +1210,28 @@ class MCPStdioClient:
                         except Exception as e:
                             await logger.aerror(f"Error in progress callback: {e}")
 
-                    # Pass progressToken through the meta parameter
                     result = await asyncio.wait_for(
                         session.call_tool(
                             tool_name,
                             arguments=arguments,
                             progress_callback=progress_handler,
-                            meta={"progressToken": progress_token},
+                            meta=meta_dict,
                         ),
                         timeout=30.0,  # 30 second timeout
                     )
                 else:
+                    # Still pass meta even without callback
                     result = await asyncio.wait_for(
-                        session.call_tool(tool_name, arguments=arguments),
+                        session.call_tool(
+                            tool_name,
+                            arguments=arguments,
+                            meta=meta_dict,
+                        ),
                         timeout=30.0,  # 30 second timeout
                     )
+
+                print("[UTIL.PY DEBUG] session.call_tool completed successfully")
+                await logger.adebug("[UTIL.PY DEBUG] session.call_tool completed successfully")
             except Exception as e:
                 current_error_type = type(e).__name__
                 await logger.awarning(f"Tool '{tool_name}' failed on attempt {attempt + 1}: {current_error_type} - {e}")
@@ -1215,7 +1239,7 @@ class MCPStdioClient:
                 # Import specific MCP error types for detection
                 try:
                     is_closed_resource_error = isinstance(e, ClosedResourceError)
-                    is_mcp_connection_error = isinstance(e, McpError) and "Connection closed" in str(e)
+                    is_mcp_connection_error = isinstance(e, MCPError) and "Connection closed" in str(e)
                 except ImportError:
                     is_closed_resource_error = "ClosedResourceError" in str(type(e))
                     is_mcp_connection_error = "Connection closed" in str(e)
@@ -1482,12 +1506,19 @@ class MCPStreamableHttpClient:
                 # Get or create persistent session
                 session = await self._get_or_create_session()
 
+                # ALWAYS set up progress token (even without callback)
+                # Get the request_id that will be used for this request
+                progress_token = session._request_id
+                await logger.adebug(f"[UTIL.PY DEBUG] Using progress_token = request_id: {progress_token}")
+                print(f"[UTIL.PY DEBUG] Using progress_token = request_id: {progress_token}")
+
+                # Create meta dict with progressToken
+                meta_dict = {"progressToken": progress_token}
+                print(f"[UTIL.PY DEBUG] About to call session.call_tool with meta={meta_dict}")
+                await logger.adebug(f"[UTIL.PY DEBUG] About to call session.call_tool with meta={meta_dict}")
+
                 # Set up progress tracking if callback provided
                 if progress_callback:
-                    # Get the request_id that will be used for this request
-                    progress_token = session._request_id
-                    await logger.adebug(f"Using progress_token = request_id: {progress_token}")
-
                     # Create progress handler that matches MCP SDK signature
                     async def progress_handler(progress: float, total: float | None = None, message: str | None = None):
                         """Handle progress notifications from MCP server."""
@@ -1505,21 +1536,28 @@ class MCPStreamableHttpClient:
                         except Exception as e:
                             await logger.aerror(f"Error in progress callback: {e}")
 
-                    # Pass progressToken through the meta parameter
                     result = await asyncio.wait_for(
                         session.call_tool(
                             tool_name,
                             arguments=arguments,
                             progress_callback=progress_handler,
-                            meta={"progressToken": progress_token},
+                            meta=meta_dict,
                         ),
                         timeout=30.0,  # 30 second timeout
                     )
                 else:
+                    # Still pass meta even without callback
                     result = await asyncio.wait_for(
-                        session.call_tool(tool_name, arguments=arguments),
+                        session.call_tool(
+                            tool_name,
+                            arguments=arguments,
+                            meta=meta_dict,
+                        ),
                         timeout=30.0,  # 30 second timeout
                     )
+
+                print("[UTIL.PY DEBUG] session.call_tool completed successfully")
+                await logger.adebug("[UTIL.PY DEBUG] session.call_tool completed successfully")
             except Exception as e:
                 current_error_type = type(e).__name__
                 await logger.awarning(f"Tool '{tool_name}' failed on attempt {attempt + 1}: {current_error_type} - {e}")
@@ -1527,10 +1565,10 @@ class MCPStreamableHttpClient:
                 # Import specific MCP error types for detection
                 try:
                     from anyio import ClosedResourceError
-                    from mcp.shared.exceptions import McpError
+                    from mcp.shared.exceptions import MCPError
 
                     is_closed_resource_error = isinstance(e, ClosedResourceError)
-                    is_mcp_connection_error = isinstance(e, McpError) and "Connection closed" in str(e)
+                    is_mcp_connection_error = isinstance(e, MCPError) and "Connection closed" in str(e)
                 except ImportError:
                     is_closed_resource_error = "ClosedResourceError" in str(type(e))
                     is_mcp_connection_error = "Connection closed" in str(e)
@@ -1735,7 +1773,7 @@ async def update_tools(
         if not tool or not hasattr(tool, "name"):
             continue
         try:
-            args_schema = create_input_schema_from_json_schema(tool.inputSchema)
+            args_schema = create_input_schema_from_json_schema(tool.input_schema)
             if not args_schema:
                 logger.warning(f"Could not create schema for tool '{tool.name}' from server '{server_name}'")
                 continue

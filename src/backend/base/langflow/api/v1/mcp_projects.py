@@ -27,7 +27,6 @@ from mcp import types
 from mcp.server import NotificationOptions, Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from pydantic import AnyUrl
 from sqlalchemy.orm import selectinload
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -1211,43 +1210,53 @@ async def _get_mcp_composer_auth_config(project) -> dict:
 class ProjectMCPServer:
     def __init__(self, project_id: UUID):
         self.project_id = project_id
-        self.server = Server(f"langflow-mcp-project-{project_id}")
-        # TODO: implement an environment variable to enable/disable stateless mode
-        self.session_manager = StreamableHTTPSessionManager(self.server, stateless=True)
-        # since we lazily initialize the session manager's lifecycle
-        # via .run(), which can only be called once, otherwise an error is raised,
-        # we use the lock to prevent race conditions on concurrent requests to prevent such an error
-        self._manager_lock = anyio.Lock()
-        self._manager_started = False  # whether or not the session manager is running
 
-        # Register handlers that filter by project
-        @self.server.list_tools()
+        # Define handler functions that will be passed to Server constructor
         @handle_mcp_errors
-        async def handle_list_project_tools():
+        async def handle_list_project_tools_handler(ctx, params):
             """Handle listing tools for this specific project."""
-            return await handle_list_tools(project_id=self.project_id, mcp_enabled_only=True)
+            result = await handle_list_tools(project_id=self.project_id, mcp_enabled_only=True)
+            return types.ListToolsResult(tools=result)
 
-        @self.server.list_prompts()
-        async def handle_list_prompts():
-            return []
+        async def handle_list_prompts_handler(ctx, params):
+            """Handle listing prompts for this specific project."""
+            return types.ListPromptsResult(prompts=[])
 
-        @self.server.list_resources()
-        async def handle_list_project_resources():
+        async def handle_list_project_resources_handler(ctx, params):
             """Handle listing resources for this specific project."""
-            return await handle_list_resources(project_id=self.project_id)
+            result = await handle_list_resources(project_id=self.project_id)
+            return types.ListResourcesResult(resources=result)
 
-        @self.server.read_resource()
-        async def handle_read_project_resource(uri: AnyUrl) -> bytes:
+        async def handle_read_project_resource_handler(ctx, params: types.ReadResourceRequestParams):
             """Handle resource read requests for this specific project."""
-            return await handle_read_resource(uri=str(uri))
+            content = await handle_read_resource(uri=str(params.uri))
+            return types.ReadResourceResult(
+                contents=[types.TextResourceContents(uri=str(params.uri), text=content.decode())]
+            )
 
-        @self.server.call_tool()
         @handle_mcp_errors
-        async def handle_call_project_tool(name: str, arguments: dict) -> list[types.TextContent]:
+        async def handle_call_project_tool_handler(ctx, params: types.CallToolRequestParams):
             """Handle tool execution requests for this specific project."""
-            # Extract progress token from arguments._meta (MCP spec location)
+            name = params.name
+            arguments = params.arguments or {}
+
+            print("[MCP HANDLER DEBUG] handle_call_project_tool called")
+            print(f"[MCP HANDLER DEBUG] name: {name}")
+            print(f"[MCP HANDLER DEBUG] arguments type: {type(arguments)}")
+            print(
+                f"[MCP HANDLER DEBUG] arguments keys: {list(arguments.keys()) if isinstance(arguments, dict) else 'not a dict'}"
+            )
+            print(f"[MCP HANDLER DEBUG] arguments: {arguments}")
+            print(f"[MCP HANDLER DEBUG] ctx.meta: {ctx.meta}")
+
+            # Extract progress token from ctx.meta (new SDK location)
             progress_token = None
-            if "_meta" in arguments:
+            if ctx.meta and hasattr(ctx.meta, "progressToken"):
+                progress_token = ctx.meta.progressToken
+                print(f"[MCP HANDLER DEBUG] Found progressToken in ctx.meta: {progress_token}")
+
+            # Fallback: Extract progress token from arguments._meta (MCP spec location)
+            if progress_token is None and "_meta" in arguments:
                 meta = arguments.get("_meta", {})
                 progress_token = meta.get("progressToken")
                 print(f"[MCP HANDLER DEBUG] Found _meta in arguments with progressToken: {progress_token}")
@@ -1256,14 +1265,34 @@ class ProjectMCPServer:
             else:
                 print("[MCP HANDLER DEBUG] No _meta found in arguments")
 
-            return await handle_call_tool(
+            result = await handle_call_tool(
                 name=name,
                 arguments=arguments,
                 server=self.server,
                 project_id=self.project_id,
                 is_action=True,
                 progress_token=progress_token,
+                request_context=ctx,
             )
+            return types.CallToolResult(content=result)  # type: ignore[arg-type]
+
+        # Create server with constructor-based handler registration
+        self.server = Server(
+            f"langflow-mcp-project-{project_id}",
+            on_list_tools=handle_list_project_tools_handler,
+            on_list_prompts=handle_list_prompts_handler,
+            on_list_resources=handle_list_project_resources_handler,
+            on_read_resource=handle_read_project_resource_handler,
+            on_call_tool=handle_call_project_tool_handler,
+        )
+
+        # TODO: implement an environment variable to enable/disable stateless mode
+        self.session_manager = StreamableHTTPSessionManager(self.server, stateless=True)
+        # since we lazily initialize the session manager's lifecycle
+        # via .run(), which can only be called once, otherwise an error is raised,
+        # we use the lock to prevent race conditions on concurrent requests to prevent such an error
+        self._manager_lock = anyio.Lock()
+        self._manager_started = False  # whether or not the session manager is running
 
     async def ensure_session_manager_running(self) -> None:
         """Start the project's Streamable HTTP manager if needed."""

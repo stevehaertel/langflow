@@ -9,7 +9,6 @@ from mcp import types
 from mcp.server import NotificationOptions, Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from pydantic import AnyUrl
 
 from langflow.api.utils import CurrentActiveMCPUser, raise_error_if_astra_cloud_env
 from langflow.api.v1.mcp_utils import (
@@ -23,56 +22,55 @@ from langflow.api.v1.mcp_utils import (
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
-server = Server("langflow-mcp-server")
+
+# Handler functions for the new constructor-based API
+async def handle_list_prompts_handler(ctx, params):
+    """Handle listing prompts for global MCP server."""
+    return types.ListPromptsResult(prompts=[])
 
 
-@server.list_prompts()
-async def handle_list_prompts():
-    return []
-
-
-@server.list_resources()
-async def handle_global_resources():
+async def handle_global_resources_handler(ctx, params):
     """Handle listing resources for global MCP server."""
-    return await handle_list_resources()
+    result = await handle_list_resources()
+    return types.ListResourcesResult(resources=result)
 
 
-@server.read_resource()
-async def handle_global_read_resource(uri: AnyUrl) -> bytes:
+async def handle_global_read_resource_handler(ctx, params: types.ReadResourceRequestParams):
     """Handle resource read requests for global MCP server."""
-    return await handle_read_resource(str(uri))
+    content = await handle_read_resource(str(params.uri))
+    return types.ReadResourceResult(contents=[types.TextResourceContents(uri=str(params.uri), text=content.decode())])
 
 
-@server.list_tools()
-async def handle_global_tools():
+async def handle_global_tools_handler(ctx, params):
     """Handle listing tools for global MCP server."""
-    return await handle_list_tools()
+    result = await handle_list_tools()
+    return types.ListToolsResult(tools=result)
 
 
-@server.call_tool()
 @handle_mcp_errors
-async def handle_global_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+async def handle_global_call_tool_handler(ctx, params: types.CallToolRequestParams):
     """Handle tool execution requests for global MCP server."""
     import json
+
+    name = params.name
+    arguments = params.arguments or {}
 
     print("[MCP HANDLER DEBUG] Received call_tool request")
     print(f"[MCP HANDLER DEBUG] Tool name: {name}")
     print(f"[MCP HANDLER DEBUG] Arguments: {json.dumps(arguments, indent=2)}")
 
-    # Check server.request_context
-    if server.request_context:
-        print("[MCP HANDLER DEBUG] request_context exists")
-        print(f"[MCP HANDLER DEBUG] request_context.meta: {server.request_context.meta}")
-        if server.request_context.meta:
-            print(
-                f"[MCP HANDLER DEBUG] request_context.meta dict: {server.request_context.meta.model_dump() if hasattr(server.request_context.meta, 'model_dump') else vars(server.request_context.meta)}"
-            )
-    else:
-        print("[MCP HANDLER DEBUG] request_context is None")
-
-    # Extract progress token from arguments._meta (MCP spec location)
+    # Check ctx.meta for progress token
     progress_token = None
-    if "_meta" in arguments:
+    if ctx.meta:
+        print(f"[MCP HANDLER DEBUG] ctx.meta exists: {ctx.meta}")
+        if hasattr(ctx.meta, "progressToken"):
+            progress_token = ctx.meta.progressToken
+            print(f"[MCP HANDLER DEBUG] Extracted progress_token from ctx.meta: {progress_token}")
+    else:
+        print("[MCP HANDLER DEBUG] ctx.meta is None")
+
+    # Extract progress token from arguments._meta (MCP spec location) as fallback
+    if progress_token is None and "_meta" in arguments:
         meta = arguments.get("_meta", {})
         progress_token = meta.get("progressToken")
         print(f"[MCP HANDLER DEBUG] Extracted progress_token from arguments._meta: {progress_token}")
@@ -81,13 +79,20 @@ async def handle_global_call_tool(name: str, arguments: dict) -> list[types.Text
     else:
         print("[MCP HANDLER DEBUG] No _meta in arguments")
 
-    # Fallback: Try to get progress token from server.request_context.meta
-    # This is where the MCP SDK server stores it when using HTTP/SSE transport
-    if progress_token is None and server.request_context and server.request_context.meta:
-        progress_token = server.request_context.meta.progressToken
-        print(f"[MCP HANDLER DEBUG] Using progress_token from request_context.meta: {progress_token}")
+    result = await handle_call_tool(name, arguments, server, progress_token=progress_token, request_context=ctx)
+    # Cast to list[types.ContentBlock] to satisfy type checker (TextContent is a ContentBlock)
+    return types.CallToolResult(content=result)  # type: ignore[arg-type]
 
-    return await handle_call_tool(name, arguments, server, progress_token=progress_token)
+
+# Create server with constructor-based handler registration
+server = Server(
+    "langflow-mcp-server",
+    on_list_prompts=handle_list_prompts_handler,
+    on_list_resources=handle_global_resources_handler,
+    on_read_resource=handle_global_read_resource_handler,
+    on_list_tools=handle_global_tools_handler,
+    on_call_tool=handle_global_call_tool_handler,
+)
 
 
 ########################################################
