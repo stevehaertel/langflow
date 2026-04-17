@@ -426,6 +426,16 @@ async def _dispatch_project_streamable_http(
     current_user: User,
 ) -> Response:
     """Common handler for project-specific Streamable HTTP requests."""
+    # DEBUG: Log raw request details (non-invasive)
+    print(f"[RAW HTTP REQUEST DEBUG] Method: {request.method}")
+    print(f"[RAW HTTP REQUEST DEBUG] URL: {request.url}")
+    print(f"[RAW HTTP REQUEST DEBUG] Headers: {dict(request.headers)}")
+    print(f"[RAW HTTP REQUEST DEBUG] Content-Type: {request.headers.get('content-type', 'N/A')}")
+    print(f"[RAW HTTP REQUEST DEBUG] Content-Length: {request.headers.get('content-length', 'N/A')}")
+
+    # Note: We cannot safely read the body here without breaking the stream
+    # The body will be logged by the MCP handler after it's parsed
+
     # Lazily initialize the project's Streamable HTTP manager
     # to pick up new projects as they are created.
     project_server = get_project_mcp_server(project_id)
@@ -773,8 +783,8 @@ async def install_mcp_config(
             # For non-OAuth (API key or no auth), use mcp-proxy
             streamable_http_url = await get_project_streamable_http_url(project_id)
             legacy_sse_url = await get_project_sse_url(project_id)
-            command = "uvx"
-            args = ["mcp-proxy"]
+            command = "~/mcp-proxy/.venv/bin/python"
+            args = ["-m", "mcp_proxy"]
             # Check if we need to add Langflow API key headers
             # Necessary only when Project API Key Authentication is enabled
 
@@ -1249,11 +1259,36 @@ class ProjectMCPServer:
             print(f"[MCP HANDLER DEBUG] arguments: {arguments}")
             print(f"[MCP HANDLER DEBUG] ctx.meta: {ctx.meta}")
 
+            # DEBUG: Inspect params object structure
+            print(f"[MCP HANDLER DEBUG] params type: {type(params)}")
+            print(f"[MCP HANDLER DEBUG] params.__dict__: {params.__dict__ if hasattr(params, '__dict__') else 'no __dict__'}")
+            print(f"[MCP HANDLER DEBUG] dir(params): {[attr for attr in dir(params) if not attr.startswith('_')]}")
+            if hasattr(params, 'meta'):
+                print(f"[MCP HANDLER DEBUG] params.meta: {params.meta}")
+            if hasattr(params, '_meta'):
+                print(f"[MCP HANDLER DEBUG] params._meta: {params._meta}")
+
+            # DEBUG: Try to access meta via model_dump
+            try:
+                params_dict = params.model_dump()
+                print(f"[MCP HANDLER DEBUG] params.model_dump() keys: {list(params_dict.keys())}")
+                if '_meta' in params_dict:
+                    print(f"[MCP HANDLER DEBUG] _meta in model_dump: {params_dict['_meta']}")
+                if 'meta' in params_dict:
+                    print(f"[MCP HANDLER DEBUG] meta in model_dump: {params_dict['meta']}")
+            except Exception as e:
+                print(f"[MCP HANDLER DEBUG] Error calling model_dump: {e}")
+
             # Extract progress token from ctx.meta (new SDK location)
             progress_token = None
-            if ctx.meta and hasattr(ctx.meta, "progressToken"):
-                progress_token = ctx.meta.progressToken
-                print(f"[MCP HANDLER DEBUG] Found progressToken in ctx.meta: {progress_token}")
+            if ctx.meta:
+                # ctx.meta is a dict, not an object - use dict access
+                if isinstance(ctx.meta, dict) and "progressToken" in ctx.meta:
+                    progress_token = ctx.meta["progressToken"]
+                    print(f"[MCP HANDLER DEBUG] Found progressToken in ctx.meta (dict): {progress_token}")
+                elif hasattr(ctx.meta, "progressToken"):
+                    progress_token = ctx.meta.progressToken
+                    print(f"[MCP HANDLER DEBUG] Found progressToken in ctx.meta (object): {progress_token}")
 
             # Fallback: Extract progress token from arguments._meta (MCP spec location)
             if progress_token is None and "_meta" in arguments:

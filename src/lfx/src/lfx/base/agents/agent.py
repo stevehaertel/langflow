@@ -154,6 +154,13 @@ class LCAgentComponent(Component):
             handle_parsing_errors = hasattr(self, "handle_parsing_errors") and self.handle_parsing_errors
             verbose = hasattr(self, "verbose") and self.verbose
             max_iterations = hasattr(self, "max_iterations") and self.max_iterations
+            await logger.adebug(
+                "[AGENT MCP DEBUG] constructing AgentExecutor.from_agent_and_tools: "
+                f"tool_names={[getattr(tool, 'name', type(tool).__name__) for tool in (self.tools or [])]!r}, "
+                f"tool_callbacks={[getattr(tool, 'callbacks', None) for tool in (self.tools or [])]!r}, "
+                f"handle_parsing_errors={handle_parsing_errors!r}, verbose={verbose!r}, "
+                f"max_iterations={max_iterations!r}"
+            )
             runnable = AgentExecutor.from_agent_and_tools(
                 agent=agent,
                 tools=self.tools or [],
@@ -262,11 +269,22 @@ class LCAgentComponent(Component):
             on_token_callback = cast("OnTokenFunctionType", self._event_manager.on_token)
 
         try:
+            shared_callbacks = self._get_shared_callbacks()
+            runtime_callbacks = [AgentAsyncHandler(self.log), *shared_callbacks]
+            await logger.adebug(
+                "[AGENT MCP DEBUG] about to call runnable.astream_events: "
+                f"input_keys={list(input_dict.keys())!r}, "
+                f"tool_names={[getattr(tool, 'name', type(tool).__name__) for tool in (self.tools or [])]!r}, "
+                f"tool_callbacks={[getattr(tool, 'callbacks', None) for tool in (self.tools or [])]!r}, "
+                f"runtime_callbacks={runtime_callbacks!r}, "
+                f"send_message_repr={self.send_message!r}, "
+                f"has_event_manager={self._event_manager is not None!r}"
+            )
             result = await process_agent_events(
                 runnable.astream_events(
                     input_dict,
                     # here we use the shared callbacks because the AgentExecutor uses the tools
-                    config={"callbacks": [AgentAsyncHandler(self.log), *self._get_shared_callbacks()]},
+                    config={"callbacks": runtime_callbacks},
                     version="v2",
                 ),
                 agent_message,

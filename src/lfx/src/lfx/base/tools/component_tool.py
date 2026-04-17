@@ -47,6 +47,14 @@ async def send_message_noop(
     skip_db_update: bool = False,  # noqa: ARG001
 ) -> Message:
     """No-op implementation of send_message."""
+    print(
+        f"[COMPONENT TOOL DEBUG] send_message_noop called; "
+        f"id_={id_!r}, skip_db_update={skip_db_update}, "
+        f"message_id={getattr(message, 'id', None)!r}, "
+        f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}, "
+        f"text_preview={str(getattr(message, 'text', ''))[:120]!r}, "
+        f"content_blocks={len(getattr(message, 'content_blocks', []) or [])}"
+    )
     return message
 
 
@@ -66,19 +74,39 @@ def _patch_send_message_decorator(component, func):
 
     async def async_wrapper(*args, **kwargs):
         original_send_message = component.send_message
+        print(
+            f"[COMPONENT TOOL DEBUG] Patching send_message to noop for async tool execution; "
+            f"component_id={component.get_id() if hasattr(component, 'get_id') else None!r}, "
+            f"component_display_name={getattr(component, 'display_name', None)!r}, "
+            f"func={getattr(func, '__name__', repr(func))}"
+        )
         component.send_message = send_message_noop
         try:
             return await func(*args, **kwargs)
         finally:
             component.send_message = original_send_message
+            print(
+                f"[COMPONENT TOOL DEBUG] Restored original send_message after async tool execution; "
+                f"component_id={component.get_id() if hasattr(component, 'get_id') else None!r}"
+            )
 
     def sync_wrapper(*args, **kwargs):
         original_send_message = component.send_message
+        print(
+            f"[COMPONENT TOOL DEBUG] Patching send_message to noop for sync tool execution; "
+            f"component_id={component.get_id() if hasattr(component, 'get_id') else None!r}, "
+            f"component_display_name={getattr(component, 'display_name', None)!r}, "
+            f"func={getattr(func, '__name__', repr(func))}"
+        )
         component.send_message = send_message_noop
         try:
             return func(*args, **kwargs)
         finally:
             component.send_message = original_send_message
+            print(
+                f"[COMPONENT TOOL DEBUG] Restored original send_message after sync tool execution; "
+                f"component_id={component.get_id() if hasattr(component, 'get_id') else None!r}"
+            )
 
     return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
 
@@ -117,18 +145,62 @@ def _build_output_async_function(
     method_name = output_method.__name__
 
     async def output_function(*args, **kwargs):
+        print(
+            f"[COMPONENT TOOL DEBUG] async output_function entered; "
+            f"component_id={component.get_id() if hasattr(component, 'get_id') else None!r}, "
+            f"component_display_name={getattr(component, 'display_name', None)!r}, "
+            f"method_name={method_name!r}, "
+            f"args_count={len(args)}, kwargs_keys={list(kwargs.keys())!r}, "
+            f"has_callbacks_kwarg={'callbacks' in kwargs}, "
+            f"has_progress_callback_kwarg={'progress_callback' in kwargs}"
+        )
+        callback_like_keys = [key for key in kwargs if 'callback' in key.lower()]
+        if callback_like_keys:
+            print(
+                f"[COMPONENT TOOL DEBUG] async output_function callback-like kwargs detected; "
+                f"method_name={method_name!r}, callback_like_keys={callback_like_keys!r}"
+            )
         # Create an isolated copy to prevent race conditions when this
         # tool is invoked concurrently by an agent (GitHub issue #8791)
         comp = deepcopy(component)
         local_method = getattr(comp, method_name)
+        print(
+            f"[COMPONENT TOOL DEBUG] async output_function prepared local method; "
+            f"component_copy_id={comp.get_id() if hasattr(comp, 'get_id') else None!r}, "
+            f"local_method={getattr(local_method, '__name__', repr(local_method))!r}"
+        )
         try:
             if event_manager:
+                print(
+                    f"[COMPONENT TOOL DEBUG] async output_function firing on_build_start; "
+                    f"component_copy_id={comp.get_id() if hasattr(comp, 'get_id') else None!r}"
+                )
                 await asyncio.to_thread(event_manager.on_build_start, data={"id": comp.get_id()})
+            print(
+                f"[COMPONENT TOOL DEBUG] async output_function calling comp.set; "
+                f"method_name={method_name!r}, kwargs={kwargs!r}"
+            )
             comp.set(*args, **kwargs)
+            print(
+                f"[COMPONENT TOOL DEBUG] async output_function invoking local_method; "
+                f"method_name={method_name!r}"
+            )
             result = await local_method()
+            print(
+                f"[COMPONENT TOOL DEBUG] async output_function local_method completed; "
+                f"method_name={method_name!r}, result_type={type(result).__name__!r}"
+            )
             if event_manager:
+                print(
+                    f"[COMPONENT TOOL DEBUG] async output_function firing on_build_end; "
+                    f"component_copy_id={comp.get_id() if hasattr(comp, 'get_id') else None!r}"
+                )
                 await asyncio.to_thread(event_manager.on_build_end, data={"id": comp.get_id()})
         except Exception as e:
+            print(
+                f"[COMPONENT TOOL DEBUG] async output_function raised exception; "
+                f"method_name={method_name!r}, error_type={type(e).__name__}, error={e!s}"
+            )
             raise ToolException(e) from e
         if isinstance(result, Message):
             return result.get_text()
@@ -233,6 +305,14 @@ class ComponentToolkit:
             name = f"{output.method}".strip(".")
             formatted_name = _format_tool_name(name)
             event_manager = self.component.get_event_manager()
+            print(
+                f"[COMPONENT TOOL DEBUG] Building StructuredTool; "
+                f"component_id={self.component.get_id() if hasattr(self.component, 'get_id') else None!r}, "
+                f"component_display_name={getattr(self.component, 'display_name', None)!r}, "
+                f"output_name={output.name!r}, method_name={output.method!r}, "
+                f"formatted_name={formatted_name!r}, is_async={asyncio.iscoroutinefunction(output_method)!r}, "
+                f"has_event_manager={event_manager is not None!r}, callbacks_repr={callbacks!r}"
+            )
             if asyncio.iscoroutinefunction(output_method):
                 tools.append(
                     StructuredTool(

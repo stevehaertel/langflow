@@ -116,9 +116,10 @@ async def create_project(
                     api_key_name = f"MCP Project {new_project.name} - default"
                     unmasked_api_key = await create_api_key(session, ApiKeyCreate(name=api_key_name), current_user.id)
                     # Starting v>=1.7.1, we use Streamable HTTP transport by default
-                    command = "uvx"
+                    command = "~/mcp-proxy/.venv/bin/python"
                     args = [
-                        "mcp-proxy",
+                        "-m",
+                        "mcp_proxy",
                         "--transport",
                         "streamablehttp",
                         "--headers",
@@ -132,9 +133,10 @@ async def create_project(
                     raise HTTPException(status_code=501, detail=msg)
                 else:  # default_auth_type == "none"
                     # No authentication - direct connection
-                    command = "uvx"
+                    command = "~/mcp-proxy/.venv/bin/python"
                     args = [
-                        "mcp-proxy",
+                        "-m",
+                        "mcp_proxy",
                         "--transport",
                         "streamablehttp",
                         streamable_http_url,

@@ -216,6 +216,13 @@ class AgentComponent(ToolCallingAgentComponent):
         # Get memory data
         self.chat_history = await self.get_memory_data()
         await logger.adebug(f"Retrieved {len(self.chat_history)} chat history messages")
+        await logger.adebug(
+            "[AGENT MCP DEBUG] get_agent_requirements start: "
+            f"existing_tools_type={type(getattr(self, 'tools', None)).__name__!r}, "
+            f"existing_tools_count={len(self.tools) if isinstance(getattr(self, 'tools', None), list) else 'non-list'}, "
+            f"existing_tool_names={[getattr(tool, 'name', type(tool).__name__) for tool in self.tools] if isinstance(getattr(self, 'tools', None), list) else None!r}, "
+            f"add_current_date_tool={self.add_current_date_tool!r}"
+        )
         if isinstance(self.chat_history, Message):
             self.chat_history = [self.chat_history]
 
@@ -230,8 +237,24 @@ class AgentComponent(ToolCallingAgentComponent):
                 raise TypeError(msg)
             self.tools.append(current_date_tool)
 
+        await logger.adebug(
+            "[AGENT MCP DEBUG] tools before set_tools_callbacks: "
+            f"tool_names={[getattr(tool, 'name', type(tool).__name__) for tool in self.tools] if isinstance(self.tools, list) else None!r}, "
+            f"tool_callback_attrs={[getattr(tool, 'callbacks', None) for tool in self.tools] if isinstance(self.tools, list) else None!r}"
+        )
+
         # Set shared callbacks for tracing the tools used by the agent
-        self.set_tools_callbacks(self.tools, self._get_shared_callbacks())
+        shared_callbacks = self._get_shared_callbacks()
+        await logger.adebug(
+            "[AGENT MCP DEBUG] shared callbacks resolved: "
+            f"count={len(shared_callbacks)!r}, callbacks={shared_callbacks!r}"
+        )
+        self.set_tools_callbacks(self.tools, shared_callbacks)
+        await logger.adebug(
+            "[AGENT MCP DEBUG] tools after set_tools_callbacks: "
+            f"tool_names={[getattr(tool, 'name', type(tool).__name__) for tool in self.tools] if isinstance(self.tools, list) else None!r}, "
+            f"tool_callback_attrs={[getattr(tool, 'callbacks', None) for tool in self.tools] if isinstance(self.tools, list) else None!r}"
+        )
 
         return llm_model, self.chat_history, self.tools
 

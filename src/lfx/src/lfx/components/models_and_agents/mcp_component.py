@@ -631,14 +631,30 @@ class MCPToolsComponent(ComponentWithCache):
         """Build output with improved error handling and validation."""
         try:
             self.tools, _ = await self.update_tool_list()
+            await logger.adebug(
+                "[MCP COMPONENT DEBUG] build_output entered: "
+                f"component_id={getattr(self, '_id', None)!r}, "
+                f"tool={self.tool!r}, "
+                f"session_id={getattr(self, 'session_id', None)!r}, "
+                f"tool_cache_keys={list(self._tool_cache.keys())!r}"
+            )
             if self.tool != "":
                 # Set session context for persistent MCP sessions using Langflow session ID
                 session_context = self._get_session_context()
+                await logger.adebug(
+                    "[MCP COMPONENT DEBUG] session context resolved: "
+                    f"tool={self.tool!r}, session_context={session_context!r}"
+                )
                 if session_context:
                     self.stdio_client.set_session_context(session_context)
                     self.streamable_http_client.set_session_context(session_context)
                 exec_tool = self._tool_cache[self.tool]
                 tool_args = self.get_inputs_for_all_tools(self.tools)[self.tool]
+                await logger.adebug(
+                    "[MCP COMPONENT DEBUG] resolved execution context: "
+                    f"tool={self.tool!r}, exec_tool_type={type(exec_tool).__name__!r}, "
+                    f"exec_tool_repr={exec_tool!r}, tool_args={[arg.name for arg in tool_args]!r}"
+                )
                 kwargs = {}
                 for arg in tool_args:
                     value = getattr(self, arg.name, None)
@@ -649,14 +665,30 @@ class MCPToolsComponent(ComponentWithCache):
                             kwargs[arg.name] = value
 
                 unflattened_kwargs = maybe_unflatten_dict(kwargs)
+                should_stream_progress = self._should_stream_progress()
+                await logger.adebug(
+                    "[MCP COMPONENT DEBUG] preparing tool invocation: "
+                    f"tool={self.tool!r}, kwargs={kwargs!r}, "
+                    f"unflattened_kwargs={unflattened_kwargs!r}, "
+                    f"should_stream_progress={should_stream_progress!r}, "
+                    f"has_event_manager={self._event_manager is not None!r}, "
+                    f"has_send_message={hasattr(self, 'send_message')!r}"
+                )
 
                 # Only create progress callback if streaming is enabled
                 progress_callback: Callable[[dict[str, Any]], None] | None = None
-                if self._should_stream_progress():
+                if should_stream_progress:
 
                     def _progress_callback(notification: dict[str, Any]) -> None:
                         """Forward progress notifications to event manager."""
                         print(f"[MCP COMPONENT PROGRESS] Callback received notification: {notification}")
+                        print(
+                            "[MCP COMPONENT DEBUG] _progress_callback invoked: "
+                            f"tool={self.tool!r}, "
+                            f"notification_keys={list(notification.keys())!r}, "
+                            f"has_event_manager={self._event_manager is not None!r}, "
+                            f"has_send_message={hasattr(self, 'send_message')!r}"
+                        )
                         # Extract message from progress notification
                         message_text = notification.get("message", "")
                         print(
@@ -674,6 +706,11 @@ class MCPToolsComponent(ComponentWithCache):
                             )
 
                             print("[MCP COMPONENT PROGRESS] Created progress message, attempting to send...")
+                            print(
+                                "[MCP COMPONENT DEBUG] progress message prepared: "
+                                f"session_id={progress_message.session_id!r}, "
+                                f"text_preview={progress_message.text[:120]!r}"
+                            )
                             # Send the message asynchronously
                             import asyncio
 
@@ -681,8 +718,14 @@ class MCPToolsComponent(ComponentWithCache):
                                 # Try to send the message if we have the method
                                 if hasattr(self, "send_message"):
                                     print("[MCP COMPONENT PROGRESS] Calling send_message...")
-                                    asyncio.create_task(self.send_message(progress_message))
+                                    task = asyncio.create_task(self.send_message(progress_message))
+                                    print(
+                                        "[MCP COMPONENT DEBUG] Created async task for send_message: "
+                                        f"task={task!r}"
+                                    )
                                     print("[MCP COMPONENT PROGRESS] Created async task for send_message")
+                                else:
+                                    print("[MCP COMPONENT DEBUG] send_message attribute not present on component")
                             except Exception as e:
                                 print(f"[MCP COMPONENT PROGRESS] Error sending message: {e}")
                                 # Fallback to event manager if send_message fails
@@ -691,11 +734,31 @@ class MCPToolsComponent(ComponentWithCache):
                                     self._event_manager.on_message(
                                         data={"text": message_text, "type": "progress", "source": "mcp_tool"}
                                     )
+                        else:
+                            print("[MCP COMPONENT DEBUG] progress notification had no message text")
 
                     progress_callback = _progress_callback
+                    await logger.adebug(
+                        "[MCP COMPONENT DEBUG] progress callback created: "
+                        f"tool={self.tool!r}, callback_repr={progress_callback!r}"
+                    )
+                else:
+                    await logger.adebug(
+                        "[MCP COMPONENT DEBUG] progress callback not created because streaming disabled: "
+                        f"tool={self.tool!r}"
+                    )
 
                 # Execute tool with progress callback (None if streaming disabled)
+                await logger.adebug(
+                    "[MCP COMPONENT DEBUG] invoking exec_tool.coroutine: "
+                    f"tool={self.tool!r}, progress_callback_present={progress_callback is not None!r}, "
+                    f"progress_callback_repr={progress_callback!r}"
+                )
                 output = await exec_tool.coroutine(**unflattened_kwargs, progress_callback=progress_callback)
+                await logger.adebug(
+                    "[MCP COMPONENT DEBUG] exec_tool.coroutine completed: "
+                    f"tool={self.tool!r}, output_type={type(output).__name__!r}"
+                )
                 tool_content = []
                 for item in output.content:
                     item_dict = item.model_dump()

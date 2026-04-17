@@ -411,9 +411,10 @@ async def auto_configure_starter_projects_mcp(session):
 
                 # Prepare server config (similar to new project creation)
                 if default_auth.get("auth_type", "none") == "apikey":
-                    command = "uvx"
+                    command = "~/mcp-proxy/.venv/bin/python"
                     args = [
-                        "mcp-proxy",
+                        "-m",
+                        "mcp_proxy",
                         "--transport",
                         "streamablehttp",
                         "--headers",
@@ -427,9 +428,10 @@ async def auto_configure_starter_projects_mcp(session):
                     raise HTTPException(status_code=501, detail=msg)
                 else:  # default_auth_type == "none"
                     # No authentication - direct connection
-                    command = "uvx"
+                    command = "~/mcp-proxy/.venv/bin/python"
                     args = [
-                        "mcp-proxy",
+                        "-m",
+                        "mcp_proxy",
                         "--transport",
                         "streamablehttp",
                         streamable_http_url,

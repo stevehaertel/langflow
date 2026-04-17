@@ -235,6 +235,97 @@ class MessageStreamingEventManager:
 
             traceback.print_exc()
 
+    def _normalize_progress_message(self, data: dict | str) -> str | None:
+        """Convert child-side message/event payloads into a readable MCP progress message.
+
+        This normalization is only used for MCP progress transport and does not modify
+        the original child UI message content or storage behavior.
+        """
+        message_text = None
+        if isinstance(data, dict):
+            direct_text = data.get("text") or data.get("message")
+            event_type = data.get("event")
+            file_name = data.get("name")
+            sender_name = data.get("sender_name") or data.get("sender")
+            content_blocks = data.get("content_blocks", [])
+
+            if isinstance(direct_text, str) and direct_text.strip():
+                cleaned_text = direct_text.strip()
+                if sender_name and sender_name not in {"Machine", "User"}:
+                    message_text = f"{sender_name}: {cleaned_text}"
+                else:
+                    message_text = cleaned_text
+
+            if not message_text and event_type in {"on_tool_start", "on_tool_end", "on_tool_error"}:
+                event_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+                tool_name = file_name or data.get("tool_name") or event_data.get("name")
+                if event_type == "on_tool_start" and tool_name:
+                    tool_input = event_data.get("input")
+                    if tool_input not in (None, "", {}):
+                        message_text = f"Tool: {tool_name}\nInput: {tool_input}"
+                    else:
+                        message_text = f"Tool: {tool_name}"
+                elif event_type == "on_tool_end" and tool_name:
+                    tool_output = event_data.get("output")
+                    if tool_output not in (None, "", {}):
+                        message_text = f"Tool: {tool_name}\nOutput: {tool_output}"
+                    else:
+                        message_text = f"Tool: {tool_name} completed"
+                elif event_type == "on_tool_error" and tool_name:
+                    tool_error = event_data.get("error")
+                    if tool_error not in (None, ""):
+                        message_text = f"Tool: {tool_name}\nError: {tool_error}"
+                    else:
+                        message_text = f"Tool: {tool_name} failed"
+            if not message_text and content_blocks and isinstance(content_blocks, list):
+                normalized_blocks: list[str] = []
+                for block in content_blocks:
+                    if not isinstance(block, dict):
+                        continue
+
+                    title = str(block.get("title", "")).strip()
+                    contents = block.get("contents", [])
+                    block_parts: list[str] = []
+
+                    if title:
+                        block_parts.append(f"[{title}]")
+
+                    if isinstance(contents, list):
+                        for content in contents:
+                            if not isinstance(content, dict):
+                                if content:
+                                    block_parts.append(str(content))
+                                continue
+
+                            tool_name = str(content.get("name", "")).strip()
+                            text_value = str(content.get("text", "")).strip()
+                            tool_input = str(content.get("tool_input", "")).strip()
+                            tool_output = str(content.get("tool_output", "")).strip()
+
+                            if tool_name:
+                                block_parts.append(f"Tool: {tool_name}")
+                            if text_value:
+                                block_parts.append(text_value)
+                            if tool_input:
+                                block_parts.append(f"Input: {tool_input}")
+                            if tool_output:
+                                block_parts.append(f"Output: {tool_output}")
+
+                    normalized_block = "\n".join(part for part in block_parts if part).strip()
+                    if normalized_block:
+                        normalized_blocks.append(normalized_block)
+
+                if normalized_blocks:
+                    message_text = "\n\n".join(normalized_blocks)
+                    print(f"[EVENT MANAGER DEBUG] Extracted from content_blocks: {message_text}")
+
+        elif isinstance(data, str):
+            stripped = data.strip()
+            if stripped:
+                message_text = stripped
+
+        return message_text or None
+
     async def _handle_message(self, *, data: dict):
         """Handle message events by sending them via progress notifications.
 
@@ -242,37 +333,7 @@ class MessageStreamingEventManager:
             data: Message data containing 'text', 'message', or 'content_blocks' field
         """
         try:
-            # Extract message text from data
-            message_text = None
-            if isinstance(data, dict):
-                # First try direct text fields
-                message_text = data.get("text") or data.get("message")
-
-                # If no text, try to extract from content_blocks (for SharedProgressManager)
-                if not message_text and "content_blocks" in data:
-                    content_blocks = data.get("content_blocks", [])
-                    if content_blocks and isinstance(content_blocks, list):
-                        # Get the last content block (most recent update)
-                        last_block = content_blocks[-1]
-                        if isinstance(last_block, dict):
-                            # Extract title and contents
-                            title = last_block.get("title", "")
-                            contents = last_block.get("contents", [])
-
-                            # Build message from title and first content item
-                            if title:
-                                message_text = f"[{title}]"
-                                if contents and isinstance(contents, list) and len(contents) > 0:
-                                    first_content = contents[0]
-                                    if isinstance(first_content, dict):
-                                        # For ToolContent, show the tool name
-                                        tool_name = first_content.get("name", "")
-                                        if tool_name:
-                                            message_text = f"{title}: {tool_name}"
-
-                            print(f"[EVENT MANAGER DEBUG] Extracted from content_blocks: {message_text}")
-            elif isinstance(data, str):
-                message_text = data
+            message_text = self._normalize_progress_message(data)
 
             if message_text:
                 self.message_count += 1
@@ -495,16 +556,39 @@ async def handle_call_tool(
         # Use progress_token passed from handler (extracted from request_context.meta)
         # If not provided, try to extract from arguments as fallback
         token = progress_token
+        print(f"[TOKEN EXTRACTION DEBUG] Initial progress_token parameter: {token}")
         if token is None:
             if "_meta" in arguments and isinstance(arguments["_meta"], dict):
-                token = arguments["_meta"].get("progressToken")
+                # Try both camelCase (JSON) and snake_case (Python) keys
+                token = arguments["_meta"].get("progressToken") or arguments["_meta"].get("progress_token")
+                print(f"[TOKEN EXTRACTION DEBUG] Extracted from arguments._meta: {token}")
             elif request_context and request_context.meta is not None:
-                token = request_context.meta.progressToken
+                # ctx.meta is a dict, not an object - use dict access
+                # MCP SDK converts progressToken (JSON) to progress_token (Python dict key)
+                print(f"[TOKEN EXTRACTION DEBUG] request_context.meta type: {type(request_context.meta)}")
+                print(f"[TOKEN EXTRACTION DEBUG] request_context.meta: {request_context.meta}")
+                if isinstance(request_context.meta, dict):
+                    token = request_context.meta.get("progress_token") or request_context.meta.get("progressToken")
+                    print(f"[TOKEN EXTRACTION DEBUG] Extracted from request_context.meta (dict): {token}")
+                else:
+                    token = getattr(request_context.meta, "progress_token", None) or getattr(request_context.meta, "progressToken", None)
+                    print(f"[TOKEN EXTRACTION DEBUG] Extracted from request_context.meta (object): {token}")
+
+        print(f"[TOKEN EXTRACTION DEBUG] Final token value: {token}")
 
         # Initial progress notification
         if mcp_config.enable_progress_notifications and token is not None and request_context:
+            print(
+                "[MCP SERVER DEBUG] About to send initial progress notification: "
+                f"token={token!r}, request_id={request_context.request_id!r}, "
+                f"session_type={type(request_context.session).__name__!r}"
+            )
             await request_context.session.send_progress_notification(
                 progress_token=token, progress=0.0, total=1.0, related_request_id=request_context.request_id
+            )
+            print(
+                "[MCP SERVER DEBUG] Initial progress notification send completed: "
+                f"token={token!r}, request_id={request_context.request_id!r}"
             )
 
         conversation_id = str(uuid4())
@@ -516,21 +600,39 @@ async def handle_call_tool(
             try:
                 progress = 0.0
                 while True:
+                    print(
+                        "[MCP SERVER DEBUG] Background progress task sending notification: "
+                        f"token={prog_token!r}, progress={min(0.9, progress)!r}, "
+                        f"request_id={request_context.request_id!r}"
+                    )
                     await request_context.session.send_progress_notification(
                         progress_token=prog_token,
                         progress=min(0.9, progress),
                         total=1.0,
                         related_request_id=request_context.request_id,
                     )
+                    print(
+                        "[MCP SERVER DEBUG] Background progress task send completed: "
+                        f"token={prog_token!r}, progress={min(0.9, progress)!r}, "
+                        f"request_id={request_context.request_id!r}"
+                    )
                     progress += 0.1
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 if mcp_config.enable_progress_notifications:
+                    print(
+                        "[MCP SERVER DEBUG] Background progress task sending final notification on cancel: "
+                        f"token={prog_token!r}, request_id={request_context.request_id!r}"
+                    )
                     await request_context.session.send_progress_notification(
                         progress_token=prog_token,
                         progress=1.0,
                         total=1.0,
                         related_request_id=request_context.request_id,
+                    )
+                    print(
+                        "[MCP SERVER DEBUG] Background progress task final notification completed on cancel: "
+                        f"token={prog_token!r}, request_id={request_context.request_id!r}"
                     )
                 raise
 
@@ -588,6 +690,12 @@ async def handle_call_tool(
 
             try:
                 try:
+                    print(
+                        "[MCP SERVER DEBUG] About to call simple_run_flow: "
+                        f"flow_name={flow.name!r}, stream={stream_messages!r}, "
+                        f"event_manager_type={type(event_manager).__name__ if event_manager else None}, "
+                        f"conversation_id={conversation_id!r}"
+                    )
                     result = await simple_run_flow(
                         flow=flow,
                         input_request=input_request,
@@ -596,12 +704,20 @@ async def handle_call_tool(
                         context=exec_context,
                         event_manager=event_manager,
                     )
+                    print(
+                        "[MCP SERVER DEBUG] simple_run_flow returned successfully: "
+                        f"outputs_count={len(result.outputs)!r}"
+                    )
                     # Process all outputs and messages, ensuring no duplicates
                     processed_texts = set()
 
                     def add_result(text: str):
                         if text not in processed_texts:
                             processed_texts.add(text)
+                            print(
+                                "[MCP SERVER DEBUG] Adding collected result text: "
+                                f"preview={text[:200]!r}"
+                            )
                             collected_results.append(types.TextContent(type="text", text=text))
 
                     for run_output in result.outputs:
@@ -622,15 +738,17 @@ async def handle_call_tool(
                 return collected_results
             finally:
                 if progress_task:
+                    print("[MCP SERVER DEBUG] Cancelling background progress task")
                     progress_task.cancel()
                     await asyncio.gather(progress_task, return_exceptions=True)
+                    print("[MCP SERVER DEBUG] Background progress task cancellation complete")
 
         except Exception:
             if (
                 mcp_config.enable_progress_notifications
                 and request_context
                 and request_context.meta is not None
-                and (error_token := request_context.meta.progressToken)
+                and (error_token := (request_context.meta.get("progressToken") if isinstance(request_context.meta, dict) else getattr(request_context.meta, "progressToken", None)))
             ):
                 await request_context.session.send_progress_notification(
                     progress_token=error_token, progress=1.0, total=1.0

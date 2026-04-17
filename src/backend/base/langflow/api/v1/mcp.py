@@ -63,9 +63,13 @@ async def handle_global_call_tool_handler(ctx, params: types.CallToolRequestPara
     progress_token = None
     if ctx.meta:
         print(f"[MCP HANDLER DEBUG] ctx.meta exists: {ctx.meta}")
-        if hasattr(ctx.meta, "progressToken"):
-            progress_token = ctx.meta.progressToken
+        # ctx.meta is a dict, not an object - use dict access
+        if isinstance(ctx.meta, dict) and "progressToken" in ctx.meta:
+            progress_token = ctx.meta["progressToken"]
             print(f"[MCP HANDLER DEBUG] Extracted progress_token from ctx.meta: {progress_token}")
+        elif hasattr(ctx.meta, "progressToken"):
+            progress_token = ctx.meta.progressToken
+            print(f"[MCP HANDLER DEBUG] Extracted progress_token from ctx.meta (object): {progress_token}")
     else:
         print("[MCP HANDLER DEBUG] ctx.meta is None")
 
@@ -317,6 +321,14 @@ async def _dispatch_streamable_http(
         request.url.path,
         current_user.id,
     )
+
+    # DEBUG: Log that we're about to delegate to SDK
+    print("=" * 80)
+    print("[MCP.PY] _dispatch_streamable_http called")
+    print(f"[MCP.PY DEBUG] Request method: {request.method}")
+    print(f"[MCP.PY DEBUG] Request URL: {request.url}")
+    print(f"[MCP.PY DEBUG] About to call manager.handle_request()")
+    print("=" * 80)
 
     context_token = current_user_ctx.set(current_user)
     try:

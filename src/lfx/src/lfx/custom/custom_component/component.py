@@ -1654,6 +1654,14 @@ class Component(CustomComponent):
             ValueError: If skip_db_update=True but message doesn't have an ID
         """
         if self._should_skip_message(message):
+            print(
+                "[COMPONENT DEBUG] send_message skipped by _should_skip_message: "
+                f"component_id={getattr(self, '_id', None)!r}, "
+                f"component={self.__class__.__name__}, "
+                f"message_id={message.get_id() if hasattr(message, 'get_id') else None!r}, "
+                f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}, "
+                f"text_preview={((message.text[:120] + '...') if isinstance(message.text, str) and len(message.text) > 120 else message.text)!r}"
+            )
             return message
 
         if hasattr(message, "flow_id") and isinstance(message.flow_id, str):
@@ -1667,6 +1675,14 @@ class Component(CustomComponent):
         # When skip_db_update=True, we require the message to already have an ID
         # because we're updating an existing message, not creating a new one
         if skip_db_update:
+            print(
+                "[COMPONENT DEBUG] send_message skip_db_update path: "
+                f"component_id={getattr(self, '_id', None)!r}, "
+                f"component={self.__class__.__name__}, "
+                f"message_has_id={message.has_id()!r}, "
+                f"message_id={message.get_id()!r}, "
+                f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}"
+            )
             if not message.has_id():
                 msg = (
                     "skip_db_update=True requires the message to already have an ID. "
@@ -1677,10 +1693,22 @@ class Component(CustomComponent):
             # Create a fresh Message instance for consistency with normal flow
             stored_message = await Message.create(**message.model_dump())
             self._stored_message_id = stored_message.get_id()
+            print(
+                "[COMPONENT DEBUG] send_message created in-memory stored_message: "
+                f"stored_message_id={stored_message.get_id()!r}, "
+                f"state={getattr(getattr(stored_message, 'properties', None), 'state', None)!r}"
+            )
             # Still send the event to update the client in real-time
             # Note: If this fails, we don't need DB cleanup since we didn't write to DB
             await self._send_message_event(stored_message, id_=id_)
         else:
+            print(
+                "[COMPONENT DEBUG] send_message normal store path: "
+                f"component_id={getattr(self, '_id', None)!r}, "
+                f"component={self.__class__.__name__}, "
+                f"message_id_before_store={message.get_id()!r}, "
+                f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}"
+            )
             # Normal flow: store/update in database
             stored_message = await self._store_message(message)
 
@@ -1725,7 +1753,19 @@ class Component(CustomComponent):
         if hasattr(self, "graph"):
             # Convert UUID to str if needed
             flow_id = str(self.graph.flow_id) if self.graph.flow_id else None
+        print(
+            "[COMPONENT DEBUG] _store_message before astore_message: "
+            f"component_id={getattr(self, '_id', None)!r}, "
+            f"flow_id={flow_id!r}, "
+            f"message_id={message.get_id()!r}, "
+            f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}"
+        )
         stored_messages = await astore_message(message, flow_id=flow_id)
+        print(
+            "[COMPONENT DEBUG] _store_message after astore_message: "
+            f"stored_count={len(stored_messages)!r}, "
+            f"stored_ids={[getattr(item, 'id', None) for item in stored_messages]!r}"
+        )
         if len(stored_messages) != 1:
             msg = "Only one message can be stored at a time."
             raise ValueError(msg)
@@ -1745,7 +1785,25 @@ class Component(CustomComponent):
 
             category = category or data_dict.get("category", None)
 
+            print(
+                "[COMPONENT DEBUG] _send_message_event preparing event: "
+                f"component_id={getattr(self, '_id', None)!r}, "
+                f"component={self.__class__.__name__}, "
+                f"category={category!r}, "
+                f"resolved_message_id={message_id!r}, "
+                f"event_manager_present={bool(getattr(self, '_event_manager', None))!r}, "
+                f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}, "
+                f"content_blocks_count={len(getattr(message, 'content_blocks', []) or [])!r}, "
+                f"text_preview={((message.text[:120] + '...') if isinstance(message.text, str) and len(message.text) > 120 else message.text)!r}"
+            )
+
             def _send_event():
+                print(
+                    "[COMPONENT DEBUG] _send_message_event dispatching event: "
+                    f"component_id={getattr(self, '_id', None)!r}, "
+                    f"category={category!r}, "
+                    f"data_id={data_dict.get('id')!r}"
+                )
                 match category:
                     case "error":
                         self._event_manager.on_error(data=data_dict)

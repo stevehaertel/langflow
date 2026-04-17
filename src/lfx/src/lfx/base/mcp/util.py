@@ -307,35 +307,76 @@ def _handle_tool_validation_error(
 
 
 def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -> Callable[..., Awaitable]:
-    async def tool_coroutine(*args, **kwargs):
-        # Extract progress_callback before processing other arguments
+    async def tool_coroutine(*args, callbacks=None, **kwargs):
+        raw_kwargs_keys = list(kwargs.keys())
         progress_callback = kwargs.pop("progress_callback", None)
+        await logger.adebug(
+            f"[MCP PROGRESS BRIDGE] Entering tool_coroutine for tool '{tool_name}': "
+            f"progress_callback_present={progress_callback is not None}, "
+            f"progress_callback_type={type(progress_callback).__name__ if progress_callback is not None else None}, "
+            f"callbacks_type={type(callbacks).__name__ if callbacks is not None else None}, "
+            f"callbacks_repr={callbacks!r}, "
+            f"args_count={len(args)}, kwargs_keys={list(kwargs.keys())}, raw_kwargs_keys={raw_kwargs_keys}"
+        )
 
-        # Get field names from the model (preserving order)
         field_names = list(arg_schema.model_fields.keys())
         provided_args = {}
-        # Map positional arguments to their corresponding field names
         for i, arg in enumerate(args):
             if i >= len(field_names):
                 msg = "Too many positional arguments provided"
                 raise ValueError(msg)
             provided_args[field_names[i]] = arg
-        # Merge in keyword arguments
         provided_args.update(kwargs)
         provided_args = _convert_camel_case_to_snake_case(provided_args, arg_schema)
-        # Validate input and fill defaults for missing optional fields
         try:
             validated = arg_schema.model_validate(provided_args)
         except Exception as e:  # noqa: BLE001
             _handle_tool_validation_error(e, tool_name, provided_args, arg_schema)
 
+        async def emit_progress_update(progress_data: dict[str, Any]) -> None:
+            await logger.adebug(
+                f"[MCP PROGRESS BRIDGE] emit_progress_update entered for tool '{tool_name}': "
+                f"progress_callback_present={progress_callback is not None}, "
+                f"progress_callback_type={type(progress_callback).__name__ if progress_callback is not None else None}, "
+                f"payload_keys={list(progress_data.keys())}, payload={progress_data!r}"
+            )
+
+            if progress_callback:
+                try:
+                    await logger.adebug(
+                        f"[MCP PROGRESS BRIDGE] Invoking caller progress callback for tool '{tool_name}': "
+                        f"callback_repr={progress_callback!r}"
+                    )
+                    callback_result = progress_callback(progress_data)
+                    if inspect.isawaitable(callback_result):
+                        await logger.adebug(
+                            f"[MCP PROGRESS BRIDGE] Caller progress callback returned awaitable for tool '{tool_name}'"
+                        )
+                        await callback_result
+                    await logger.adebug(
+                        f"[MCP PROGRESS BRIDGE] Caller progress callback completed for tool '{tool_name}'"
+                    )
+                except Exception as callback_error:
+                    await logger.awarning(
+                        f"Caller progress callback failed for tool '{tool_name}': {callback_error}"
+                    )
+            else:
+                await logger.adebug(
+                    f"[MCP PROGRESS BRIDGE] No caller progress callback provided for tool '{tool_name}'"
+                )
+
+            await logger.adebug(
+                f"[MCP PROGRESS BRIDGE] Tool '{tool_name}' received progress update: "
+                f"message={progress_data.get('message')!r}, "
+                f"progress={progress_data.get('progress')!r}, total={progress_data.get('total')!r}"
+            )
+
         try:
             return await client.run_tool(
-                tool_name, arguments=validated.model_dump(), progress_callback=progress_callback
+                tool_name, arguments=validated.model_dump(), progress_callback=emit_progress_update
             )
         except Exception as e:
             await logger.aerror(f"Tool '{tool_name}' execution failed: {e}")
-            # Re-raise with more context
             msg = f"Tool '{tool_name}' execution failed: {e}"
             raise ValueError(msg) from e
 
@@ -343,9 +384,17 @@ def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -
 
 
 def create_tool_func(tool_name: str, arg_schema: type[BaseModel], client) -> Callable[..., str]:
-    def tool_func(*args, **kwargs):
-        # Extract progress_callback before processing other arguments
+    def tool_func(*args, callbacks=None, **kwargs):
+        raw_kwargs_keys = list(kwargs.keys())
         progress_callback = kwargs.pop("progress_callback", None)
+        logger.debug(
+            f"[MCP PROGRESS BRIDGE] Entering tool_func for tool '{tool_name}': "
+            f"progress_callback_present={progress_callback is not None}, "
+            f"progress_callback_type={type(progress_callback).__name__ if progress_callback is not None else None}, "
+            f"callbacks_type={type(callbacks).__name__ if callbacks is not None else None}, "
+            f"callbacks_repr={callbacks!r}, "
+            f"args_count={len(args)}, kwargs_keys={list(kwargs.keys())}, raw_kwargs_keys={raw_kwargs_keys}"
+        )
 
         field_names = list(arg_schema.model_fields.keys())
         provided_args = {}
@@ -361,13 +410,53 @@ def create_tool_func(tool_name: str, arg_schema: type[BaseModel], client) -> Cal
         except Exception as e:  # noqa: BLE001
             _handle_tool_validation_error(e, tool_name, provided_args, arg_schema)
 
-        try:
-            return run_until_complete(
-                client.run_tool(tool_name, arguments=validated.model_dump(), progress_callback=progress_callback)
+        async def wrapped_run() -> Any:
+            async def emit_progress_update(progress_data: dict[str, Any]) -> None:
+                await logger.adebug(
+                    f"[MCP PROGRESS BRIDGE] emit_progress_update entered for sync tool '{tool_name}': "
+                    f"progress_callback_present={progress_callback is not None}, "
+                    f"progress_callback_type={type(progress_callback).__name__ if progress_callback is not None else None}, "
+                    f"payload_keys={list(progress_data.keys())}, payload={progress_data!r}"
+                )
+
+                if progress_callback:
+                    try:
+                        await logger.adebug(
+                            f"[MCP PROGRESS BRIDGE] Invoking caller progress callback for sync tool '{tool_name}': "
+                            f"callback_repr={progress_callback!r}"
+                        )
+                        callback_result = progress_callback(progress_data)
+                        if inspect.isawaitable(callback_result):
+                            await logger.adebug(
+                                f"[MCP PROGRESS BRIDGE] Caller progress callback returned awaitable for sync tool '{tool_name}'"
+                            )
+                            await callback_result
+                        await logger.adebug(
+                            f"[MCP PROGRESS BRIDGE] Caller progress callback completed for sync tool '{tool_name}'"
+                        )
+                    except Exception as callback_error:
+                        await logger.awarning(
+                            f"Caller progress callback failed for tool '{tool_name}': {callback_error}"
+                        )
+                else:
+                    await logger.adebug(
+                        f"[MCP PROGRESS BRIDGE] No caller progress callback provided for sync tool '{tool_name}'"
+                    )
+
+                await logger.adebug(
+                    f"[MCP PROGRESS BRIDGE] Tool '{tool_name}' received progress update: "
+                    f"message={progress_data.get('message')!r}, "
+                    f"progress={progress_data.get('progress')!r}, total={progress_data.get('total')!r}"
+                )
+
+            return await client.run_tool(
+                tool_name, arguments=validated.model_dump(), progress_callback=emit_progress_update
             )
+
+        try:
+            return run_until_complete(wrapped_run())
         except Exception as e:
             logger.error(f"Tool '{tool_name}' execution failed: {e}")
-            # Re-raise with more context
             msg = f"Tool '{tool_name}' execution failed: {e}"
             raise ValueError(msg) from e
 
@@ -724,10 +813,28 @@ class MCPSessionManager:
         async def session_task():
             """Background task that keeps the session alive."""
             try:
+                print(
+                    "[LFX MCP STDIO DEBUG] session_task launching stdio_client: "
+                    f"session_id={session_id!r}, command={getattr(connection_params, 'command', None)!r}, "
+                    f"args={getattr(connection_params, 'args', None)!r}"
+                )
                 async with stdio_client(connection_params) as (read, write):
+                    print(
+                        "[LFX MCP STDIO DEBUG] stdio_client context entered: "
+                        f"session_id={session_id!r}, read_type={type(read).__name__!r}, "
+                        f"write_type={type(write).__name__!r}"
+                    )
                     session = ClientSession(read, write)
                     async with session:
+                        print(
+                            "[LFX MCP STDIO DEBUG] Initializing stdio ClientSession: "
+                            f"session_id={session_id!r}"
+                        )
                         await session.initialize()
+                        print(
+                            "[LFX MCP STDIO DEBUG] stdio ClientSession initialized: "
+                            f"session_id={session_id!r}, next_request_id={getattr(session, '_request_id', None)!r}"
+                        )
                         # Signal that session is ready
                         session_future.set_result(session)
 
@@ -804,12 +911,22 @@ class MCPSessionManager:
 
         async def session_task():
             """Background task that keeps the session alive."""
+            print(
+                "[UTIL.PY SESSION DEBUG] session_task started: "
+                f"session_id={session_id!r}, preferred_transport={preferred_transport!r}, "
+                f"url={connection_params.get('url')!r}, headers={connection_params.get('headers')!r}, "
+                f"timeout_seconds={connection_params.get('timeout_seconds')!r}, verify_ssl={verify_ssl!r}"
+            )
             streamable_error = None
 
             # Skip Streamable HTTP if we know SSE works for this server
             if preferred_transport != "sse":
                 # Try Streamable HTTP first with a quick timeout
                 try:
+                    print(
+                        "[UTIL.PY SESSION DEBUG] Attempting Streamable HTTP connection: "
+                        f"session_id={session_id!r}, url={connection_params['url']!r}"
+                    )
                     await logger.adebug(f"Attempting Streamable HTTP connection for session {session_id}")
                     # Use a shorter timeout for the initial connection attempt (2 seconds)
                     async with streamablehttp_client(
@@ -817,11 +934,32 @@ class MCPSessionManager:
                         headers=connection_params["headers"],
                         timeout=connection_params["timeout_seconds"],
                         httpx_client_factory=custom_httpx_factory,
-                    ) as (read, write, _):
+                    ) as (read, write, get_session_id):
+                        print(
+                            "[UTIL.PY SESSION DEBUG] Streamable HTTP transport context entered: "
+                            f"session_id={session_id!r}, read_type={type(read).__name__}, "
+                            f"write_type={type(write).__name__}, get_session_id_callable={callable(get_session_id)!r}"
+                        )
                         session = ClientSession(read, write)
+                        print(
+                            "[UTIL.PY SESSION DEBUG] ClientSession created for Streamable HTTP: "
+                            f"session_id={session_id!r}, client_session_type={type(session).__name__}"
+                        )
                         async with session:
                             # Initialize with a timeout to fail fast
+                            print(
+                                "[UTIL.PY SESSION DEBUG] Initializing Streamable HTTP session: "
+                                f"session_id={session_id!r}"
+                            )
                             await asyncio.wait_for(session.initialize(), timeout=2.0)
+                            sdk_session_id = None
+                            with contextlib.suppress(Exception):
+                                sdk_session_id = get_session_id()
+                            print(
+                                "[UTIL.PY SESSION DEBUG] Streamable HTTP session initialized: "
+                                f"session_id={session_id!r}, sdk_session_id={sdk_session_id!r}, "
+                                f"next_request_id={getattr(session, '_request_id', None)!r}"
+                            )
                             used_transport.append("streamable_http")
                             await logger.ainfo(f"Session {session_id} connected via Streamable HTTP")
                             # Signal that session is ready
@@ -836,6 +974,10 @@ class MCPSessionManager:
                             except asyncio.CancelledError:
                                 await logger.ainfo(f"Session {session_id} (Streamable HTTP) is shutting down")
                 except (asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+                    print(
+                        "[UTIL.PY SESSION DEBUG] Streamable HTTP connection failed: "
+                        f"session_id={session_id!r}, error_type={type(e).__name__}, error={e}"
+                    )
                     # If Streamable HTTP fails or times out, try SSE as fallback immediately
                     streamable_error = e
                     error_type = "timed out" if isinstance(e, asyncio.TimeoutError) else "failed"
@@ -848,6 +990,10 @@ class MCPSessionManager:
             # Try SSE if Streamable HTTP failed or if SSE is preferred
             if streamable_error is not None or preferred_transport == "sse":
                 try:
+                    print(
+                        "[UTIL.PY SESSION DEBUG] Attempting SSE fallback connection: "
+                        f"session_id={session_id!r}, url={connection_params['url']!r}"
+                    )
                     await logger.adebug(f"Attempting SSE connection for session {session_id}")
                     # Extract SSE read timeout from connection params, default to 30s if not present
                     sse_read_timeout = connection_params.get("sse_read_timeout_seconds", 30)
@@ -859,9 +1005,26 @@ class MCPSessionManager:
                         sse_read_timeout,
                         httpx_client_factory=custom_httpx_factory,
                     ) as (read, write):
+                        print(
+                            "[UTIL.PY SESSION DEBUG] SSE transport context entered: "
+                            f"session_id={session_id!r}, read_type={type(read).__name__}, "
+                            f"write_type={type(write).__name__}"
+                        )
                         session = ClientSession(read, write)
+                        print(
+                            "[UTIL.PY SESSION DEBUG] ClientSession created for SSE: "
+                            f"session_id={session_id!r}, client_session_type={type(session).__name__}"
+                        )
                         async with session:
+                            print(
+                                "[UTIL.PY SESSION DEBUG] Initializing SSE session: "
+                                f"session_id={session_id!r}"
+                            )
                             await session.initialize()
+                            print(
+                                "[UTIL.PY SESSION DEBUG] SSE session initialized: "
+                                f"session_id={session_id!r}, next_request_id={getattr(session, '_request_id', None)!r}"
+                            )
                             used_transport.append("sse")
                             fallback_msg = " (fallback)" if streamable_error else " (preferred)"
                             await logger.ainfo(f"Session {session_id} connected via SSE{fallback_msg}")
@@ -878,6 +1041,10 @@ class MCPSessionManager:
                             except asyncio.CancelledError:
                                 await logger.ainfo(f"Session {session_id} (SSE) is shutting down")
                 except Exception as sse_error:  # noqa: BLE001
+                    print(
+                        "[UTIL.PY SESSION DEBUG] SSE connection failed: "
+                        f"session_id={session_id!r}, error_type={type(sse_error).__name__}, error={sse_error}"
+                    )
                     # Both transports failed (or just SSE if it was preferred)
                     if streamable_error:
                         await logger.aerror(
@@ -902,7 +1069,16 @@ class MCPSessionManager:
 
         # Wait for session to be ready (use longer timeout for remote connections)
         try:
+            print(
+                "[UTIL.PY SESSION DEBUG] Waiting for session_future: "
+                f"session_id={session_id!r}"
+            )
             session = await asyncio.wait_for(session_future, timeout=30.0)
+            print(
+                "[UTIL.PY SESSION DEBUG] session_future resolved: "
+                f"session_id={session_id!r}, session_type={type(session).__name__}, "
+                f"used_transport={used_transport[0] if used_transport else None!r}"
+            )
             # Log which transport was used
             if used_transport:
                 transport_used = used_transport[0]
@@ -1070,6 +1246,11 @@ class MCPStdioClient:
 
         command = shlex.split(command_str)
         env_data: dict[str, str] = {"DEBUG": "true", "PATH": os.environ["PATH"], **(env or {})}
+        print(
+            "[LFX MCP STDIO DEBUG] _connect_to_server called: "
+            f"command_str={command_str!r}, parsed_command={command!r}, "
+            f"session_context={self._session_context!r}, env_keys={sorted(env_data.keys())!r}"
+        )
 
         if platform.system() == "Windows":
             server_params = StdioServerParameters(
@@ -1086,6 +1267,11 @@ class MCPStdioClient:
                 args=["-c", f"exec {command_str} || echo 'Command failed with exit code $?' >&2"],
                 env=env_data,
             )
+        print(
+            "[LFX MCP STDIO DEBUG] Constructed StdioServerParameters: "
+            f"command={server_params.command!r}, args={server_params.args!r}, "
+            f"path={env_data.get('PATH')!r}"
+        )
 
         # Store connection parameters for later use in run_tool
         self._connection_params = server_params
@@ -1099,7 +1285,16 @@ class MCPStdioClient:
             self._session_context = f"default_{param_hash}"
 
         # Get or create a persistent session
+        print(
+            "[LFX MCP STDIO DEBUG] About to get/create stdio session: "
+            f"session_context={self._session_context!r}"
+        )
         session = await self._get_or_create_session()
+        print(
+            "[LFX MCP STDIO DEBUG] stdio session acquired: "
+            f"session_type={type(session).__name__!r}, "
+            f"next_request_id={getattr(session, '_request_id', None)!r}"
+        )
         response = await session.list_tools()
         self._connected = True
         return response.tools
@@ -1176,9 +1371,24 @@ class MCPStdioClient:
 
         for attempt in range(max_retries):
             try:
-                await logger.adebug(f"Attempting to run tool '{tool_name}' (attempt {attempt + 1}/{max_retries})")
+                await logger.adebug(
+                    f"Attempting to run tool '{tool_name}' (attempt {attempt + 1}/{max_retries})"
+                )
+                await logger.adebug(
+                    "[UTIL.PY RUN_TOOL DEBUG] run_tool entered: "
+                    f"tool_name={tool_name!r}, arguments_keys={list(arguments.keys())!r}, "
+                    f"progress_callback_present={progress_callback is not None!r}, "
+                    f"progress_callback_type={type(progress_callback).__name__ if progress_callback is not None else None}, "
+                    f"progress_callback_repr={progress_callback!r}, "
+                    f"session_context={self._session_context!r}, connected={self._connected!r}"
+                )
                 # Get or create persistent session
                 session = await self._get_or_create_session()
+                await logger.adebug(
+                    "[UTIL.PY RUN_TOOL DEBUG] Obtained session for run_tool: "
+                    f"tool_name={tool_name!r}, session_type={type(session).__name__!r}, "
+                    f"session_repr={session!r}"
+                )
 
                 # ALWAYS set up progress token (even without callback)
                 # Get the request_id that will be used for this request
@@ -1193,10 +1403,20 @@ class MCPStdioClient:
 
                 # Set up progress tracking if callback provided
                 if progress_callback:
+                    await logger.adebug(
+                        "[UTIL.PY RUN_TOOL DEBUG] Creating progress_handler: "
+                        f"tool_name={tool_name!r}, progress_callback_repr={progress_callback!r}"
+                    )
+
                     # Create progress handler that matches MCP SDK signature
                     async def progress_handler(progress: float, total: float | None = None, message: str | None = None):
                         """Handle progress notifications from MCP server."""
                         try:
+                            await logger.adebug(
+                                "[UTIL.PY RUN_TOOL DEBUG] progress_handler invoked: "
+                                f"tool_name={tool_name!r}, progress={progress!r}, total={total!r}, "
+                                f"message_preview={(message[:120] if isinstance(message, str) else message)!r}"
+                            )
                             # Build progress data including the message field
                             progress_data = {
                                 "progress": progress,
@@ -1205,11 +1425,30 @@ class MCPStdioClient:
                             # Add message if provided
                             if message:
                                 progress_data["message"] = message
+                            await logger.adebug(
+                                "[UTIL.PY RUN_TOOL DEBUG] progress_handler built progress_data: "
+                                f"tool_name={tool_name!r}, progress_data={progress_data!r}"
+                            )
                             # Call the user's callback
-                            progress_callback(progress_data)
+                            callback_result = progress_callback(progress_data)
+                            if inspect.isawaitable(callback_result):
+                                await logger.adebug(
+                                    "[UTIL.PY RUN_TOOL DEBUG] progress_callback returned awaitable: "
+                                    f"tool_name={tool_name!r}"
+                                )
+                                await callback_result
+                            await logger.adebug(
+                                "[UTIL.PY RUN_TOOL DEBUG] progress_callback completed successfully: "
+                                f"tool_name={tool_name!r}"
+                            )
                         except Exception as e:
                             await logger.aerror(f"Error in progress callback: {e}")
 
+                    await logger.adebug(
+                        "[UTIL.PY RUN_TOOL DEBUG] Calling session.call_tool with progress callback: "
+                        f"tool_name={tool_name!r}, meta={meta_dict!r}, "
+                        f"progress_handler_repr={progress_handler!r}"
+                    )
                     result = await asyncio.wait_for(
                         session.call_tool(
                             tool_name,
@@ -1221,6 +1460,10 @@ class MCPStdioClient:
                     )
                 else:
                     # Still pass meta even without callback
+                    await logger.adebug(
+                        "[UTIL.PY DEBUG] Calling session.call_tool without progress callback "
+                        f"for tool='{tool_name}', meta={meta_dict!r}"
+                    )
                     result = await asyncio.wait_for(
                         session.call_tool(
                             tool_name,
@@ -1502,9 +1745,20 @@ class MCPStreamableHttpClient:
 
         for attempt in range(max_retries):
             try:
+                print(
+                    "[UTIL.PY RUN_TOOL DEBUG] Starting run_tool attempt: "
+                    f"tool_name={tool_name!r}, attempt={attempt + 1!r}/{max_retries!r}, "
+                    f"session_context={self._session_context!r}, connected={self._connected!r}, "
+                    f"connection_url={self._connection_params.get('url') if self._connection_params else None!r}"
+                )
                 await logger.adebug(f"Attempting to run tool '{tool_name}' (attempt {attempt + 1}/{max_retries})")
                 # Get or create persistent session
                 session = await self._get_or_create_session()
+                print(
+                    "[UTIL.PY RUN_TOOL DEBUG] Obtained session for run_tool: "
+                    f"tool_name={tool_name!r}, session_type={type(session).__name__}, "
+                    f"session_object_id={id(session)!r}, next_request_id={getattr(session, '_request_id', None)!r}"
+                )
 
                 # ALWAYS set up progress token (even without callback)
                 # Get the request_id that will be used for this request
@@ -1518,6 +1772,11 @@ class MCPStreamableHttpClient:
                 await logger.adebug(f"[UTIL.PY DEBUG] About to call session.call_tool with meta={meta_dict}")
 
                 # Set up progress tracking if callback provided
+                print(
+                    "[UTIL.PY RUN_TOOL DEBUG] Preparing progress callback wiring: "
+                    f"tool_name={tool_name!r}, has_progress_callback={progress_callback is not None!r}, "
+                    f"progress_token={progress_token!r}"
+                )
                 if progress_callback:
                     # Create progress handler that matches MCP SDK signature
                     async def progress_handler(progress: float, total: float | None = None, message: str | None = None):
@@ -1621,7 +1880,10 @@ class MCPStreamableHttpClient:
                 # Re-raise unexpected errors
                 raise
             else:
-                await logger.adebug(f"Tool '{tool_name}' completed successfully")
+                await logger.adebug(
+                    f"[UTIL.PY DEBUG] HTTP tool '{tool_name}' completed successfully with "
+                    f"result_type={type(result).__name__}"
+                )
                 return result
 
         # This should never be reached due to the exception handling above
