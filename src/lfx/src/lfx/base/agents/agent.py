@@ -147,6 +147,13 @@ class LCAgentComponent(Component):
         self,
         agent: Runnable | BaseSingleActionAgent | BaseMultiActionAgent | AgentExecutor,
     ) -> Message:
+        # Inject progress callback into MCP tools before running the agent
+        await self._inject_progress_callback_into_tools()
+
+        # Check if this agent is being called as a tool by a parent agent
+        # If so, we'll forward our steps as progress notifications
+        parent_progress_callback = getattr(self, '_agent_progress_callback', None)
+
         if isinstance(agent, AgentExecutor):
             runnable = agent
         else:
@@ -268,6 +275,62 @@ class LCAgentComponent(Component):
         if self._event_manager:
             on_token_callback = cast("OnTokenFunctionType", self._event_manager.on_token)
 
+        # Create a wrapper for send_message that also forwards agent steps as progress notifications
+        # if this agent is being called as a tool by a parent agent
+        send_message_callback = cast("SendMessageFunctionType", self.send_message)
+        if parent_progress_callback:
+            await logger.adebug(
+                "[AGENT MCP DEBUG] Child agent detected parent callback - will forward agent steps as progress"
+            )
+
+            async def send_message_with_progress(message: Message, skip_db_update: bool = False) -> Message:
+                """Wrapper that sends message locally AND forwards as progress notification to parent."""
+                # First, send the message locally (to child flow's UI)
+                result_message = await self.send_message(message=message, skip_db_update=skip_db_update)
+
+                # Then, forward agent steps as progress notifications to parent
+                # Extract the latest content from the message to send as progress
+                if message.content_blocks and message.content_blocks[0].contents:
+                    latest_content = message.content_blocks[0].contents[-1]
+
+                    # Format the progress message based on content type
+                    if hasattr(latest_content, 'type'):
+                        if latest_content.type == "tool_use":
+                            # Tool invocation
+                            header = getattr(latest_content, 'header', None)
+                            if header and isinstance(header, dict):
+                                progress_msg = f"🔨 {header.get('title', 'Tool use')}"
+                            else:
+                                progress_msg = "🔨 Tool use"
+                            if hasattr(latest_content, 'output') and latest_content.output:
+                                name = getattr(latest_content, 'name', 'tool')
+                                progress_msg = f"✅ Executed **{name}**"
+                        elif latest_content.type == "text":
+                            # Text content (input/output)
+                            header = getattr(latest_content, 'header', None)
+                            if header and isinstance(header, dict):
+                                title = header.get('title', 'Text')
+                            else:
+                                title = 'Text'
+                            progress_msg = f"📝 {title}"
+                        else:
+                            progress_msg = f"Agent step: {latest_content.type}"
+
+                        # Send progress notification to parent
+                        try:
+                            await parent_progress_callback(progress_msg)
+                            await logger.adebug(
+                                f"[AGENT MCP DEBUG] Forwarded agent step to parent: {progress_msg!r}"
+                            )
+                        except Exception as e:
+                            await logger.awarning(
+                                f"[AGENT MCP DEBUG] Failed to forward agent step to parent: {e}"
+                            )
+
+                return result_message
+
+            send_message_callback = cast("SendMessageFunctionType", send_message_with_progress)
+
         try:
             shared_callbacks = self._get_shared_callbacks()
             runtime_callbacks = [AgentAsyncHandler(self.log), *shared_callbacks]
@@ -278,7 +341,8 @@ class LCAgentComponent(Component):
                 f"tool_callbacks={[getattr(tool, 'callbacks', None) for tool in (self.tools or [])]!r}, "
                 f"runtime_callbacks={runtime_callbacks!r}, "
                 f"send_message_repr={self.send_message!r}, "
-                f"has_event_manager={self._event_manager is not None!r}"
+                f"has_event_manager={self._event_manager is not None!r}, "
+                f"has_parent_callback={parent_progress_callback is not None!r}"
             )
             result = await process_agent_events(
                 runnable.astream_events(
@@ -288,7 +352,7 @@ class LCAgentComponent(Component):
                     version="v2",
                 ),
                 agent_message,
-                cast("SendMessageFunctionType", self.send_message),
+                send_message_callback,
                 on_token_callback,
             )
         except ExceptionWithMessageError as e:
@@ -382,6 +446,43 @@ class LCToolsAgentComponent(LCAgentComponent):
         for tool in tools_list or []:
             if hasattr(tool, "callbacks"):
                 tool.callbacks = callbacks_list
+
+    async def _inject_progress_callback_into_tools(self) -> None:
+        """Inject progress callback into MCP tools so they can send progress updates to the UI."""
+        if not self.tools:
+            return
+
+        # Create a progress callback that sends messages to the UI
+        async def agent_progress_callback(progress_data: dict) -> None:
+            """Forward progress notifications from MCP tools to the agent's UI."""
+            message_text = progress_data.get("message", "")
+            if message_text and hasattr(self, "send_message"):
+                from lfx.schema.message import Message
+                progress_message = Message(
+                    text=f"[Tool Progress] {message_text}",
+                    sender="Machine",
+                    sender_name="Agent Tool",
+                    session_id=getattr(self, "session_id", ""),
+                )
+                try:
+                    await self.send_message(progress_message)
+                    await logger.adebug(
+                        f"[AGENT PROGRESS] Sent progress message to UI: {message_text[:100]}"
+                    )
+                except Exception as e:
+                    await logger.awarning(f"[AGENT PROGRESS] Failed to send progress message: {e}")
+
+        # Inject the callback into MCP tools
+        for tool in self.tools:
+            # Check if this is an MCP tool by looking for the coroutine attribute
+            if hasattr(tool, "coroutine") and hasattr(tool.coroutine, "__name__"):
+                # Store the callback in the tool's metadata so the MCP tool_coroutine can access it
+                if not hasattr(tool, "metadata"):
+                    tool.metadata = {}
+                tool.metadata["_agent_progress_callback"] = agent_progress_callback
+                await logger.adebug(
+                    f"[AGENT PROGRESS] Injected progress callback into tool: {tool.name}"
+                )
 
     async def _get_tools(self) -> list[Tool]:
         component_toolkit = _get_component_toolkit()

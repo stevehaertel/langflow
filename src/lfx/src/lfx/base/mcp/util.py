@@ -310,6 +310,17 @@ def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -
     async def tool_coroutine(*args, callbacks=None, **kwargs):
         raw_kwargs_keys = list(kwargs.keys())
         progress_callback = kwargs.pop("progress_callback", None)
+
+        # Check if the agent injected a progress callback into the tool's metadata
+        if progress_callback is None and hasattr(tool_coroutine, "_tool_obj"):
+            tool_obj = tool_coroutine._tool_obj  # type: ignore
+            if hasattr(tool_obj, "metadata") and isinstance(tool_obj.metadata, dict):
+                progress_callback = tool_obj.metadata.get("_agent_progress_callback")
+                if progress_callback:
+                    await logger.adebug(
+                        f"[MCP PROGRESS BRIDGE] Found agent-injected progress callback in tool metadata for '{tool_name}'"
+                    )
+
         await logger.adebug(
             f"[MCP PROGRESS BRIDGE] Entering tool_coroutine for tool '{tool_name}': "
             f"progress_callback_present={progress_callback is not None}, "
@@ -2098,15 +2109,21 @@ async def update_tools(
 
                     return converted_dict
 
+            # Create the coroutine with a reference to the tool object so it can access metadata
+            tool_coroutine = create_tool_coroutine(tool.name, args_schema, client)
+
             tool_obj = MCPStructuredTool(
                 name=tool.name,
                 description=tool.description or "",
                 args_schema=args_schema,
                 func=create_tool_func(tool.name, args_schema, client),
-                coroutine=create_tool_coroutine(tool.name, args_schema, client),
+                coroutine=tool_coroutine,
                 tags=[tool.name],
                 metadata={"server_name": server_name},
             )
+
+            # Store a reference to the tool object in the coroutine so it can access metadata
+            tool_coroutine._tool_obj = tool_obj  # type: ignore
 
             tool_list.append(tool_obj)
             tool_cache[tool.name] = tool_obj

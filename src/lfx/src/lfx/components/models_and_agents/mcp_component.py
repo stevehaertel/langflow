@@ -675,9 +675,19 @@ class MCPToolsComponent(ComponentWithCache):
                     f"has_send_message={hasattr(self, 'send_message')!r}"
                 )
 
-                # Only create progress callback if streaming is enabled
+                # Check if we have an agent-provided progress callback (when used as a tool)
+                agent_progress_callback = getattr(self, '_agent_progress_callback', None)
+
+                # Only create progress callback if streaming is enabled OR agent provided one
                 progress_callback: Callable[[dict[str, Any]], None] | None = None
-                if should_stream_progress:
+                if agent_progress_callback is not None:
+                    # Use the agent's progress callback directly
+                    progress_callback = agent_progress_callback
+                    await logger.adebug(
+                        "[MCP COMPONENT DEBUG] using agent-provided progress callback: "
+                        f"tool={self.tool!r}, callback_repr={progress_callback!r}"
+                    )
+                elif should_stream_progress:
 
                     def _progress_callback(notification: dict[str, Any]) -> None:
                         """Forward progress notifications to event manager."""

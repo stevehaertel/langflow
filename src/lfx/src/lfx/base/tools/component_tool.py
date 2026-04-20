@@ -160,9 +160,26 @@ def _build_output_async_function(
                 f"[COMPONENT TOOL DEBUG] async output_function callback-like kwargs detected; "
                 f"method_name={method_name!r}, callback_like_keys={callback_like_keys!r}"
             )
+
+        # Extract progress_callback before comp.set() since it's not a component input
+        progress_callback = kwargs.pop("progress_callback", None)
+        print(
+            f"[COMPONENT TOOL DEBUG] async output_function extracted progress_callback; "
+            f"method_name={method_name!r}, progress_callback_present={progress_callback is not None}"
+        )
+
         # Create an isolated copy to prevent race conditions when this
         # tool is invoked concurrently by an agent (GitHub issue #8791)
         comp = deepcopy(component)
+
+        # Store progress_callback on the component so it can be used by build_output
+        if progress_callback is not None:
+            comp._agent_progress_callback = progress_callback
+            print(
+                f"[COMPONENT TOOL DEBUG] async output_function stored progress_callback on component; "
+                f"component_copy_id={comp.get_id() if hasattr(comp, 'get_id') else None!r}"
+            )
+
         local_method = getattr(comp, method_name)
         print(
             f"[COMPONENT TOOL DEBUG] async output_function prepared local method; "
