@@ -33,8 +33,73 @@ DEFAULT_TOOLS_DESCRIPTION = "A helpful assistant with access to the following to
 DEFAULT_AGENT_NAME = "Agent ({tools_names})"
 
 
+def _detect_message_type(message_text: str) -> str:
+    """Detect message type from content.
+    
+    This is Langflow-specific logic, not part of MCP spec.
+    We analyze the message content that came from MCP notification params.
+    
+    Message Content Examples (From MCP params.message):
+    1. "What is the metadata of my data product with id ABC?" → tool_progress
+    2. "[Agent Steps]" → agent_steps
+    3. "[Agent Steps]\nWhat is the metadata..." → agent_steps
+    4. "AI: Here's the metadata..." → final_answer
+    5. "Tool: get_metadata\nInput: {...}" → tool_invocation
+    6. "[Agent Steps]\n...\nTool: get_metadata\nInput: {...}" → tool_invocation (priority)
+    
+    Args:
+        message_text: The message text from MCP notification params
+        
+    Returns:
+        Message type: "agent_steps" | "final_answer" | "tool_invocation" | "tool_progress"
+    """
+    # Check for tool invocation FIRST (higher priority than agent_steps)
+    # This ensures tool invocations get their own message block with hammer emoji
+    if "Tool:" in message_text and "Input:" in message_text:
+        return "tool_invocation"
+    elif message_text.startswith("AI:"):
+        return "final_answer"
+    elif "[Agent Steps]" in message_text:
+        return "agent_steps"
+    else:
+        return "tool_progress"
+
+
+def _format_progress_message(message_text: str, message_type: str) -> str:
+    """Format progress message based on type.
+    
+    This is Langflow-specific formatting logic.
+    
+    Args:
+        message_text: The original message text
+        message_type: The detected message type
+        
+    Returns:
+        Formatted message text with appropriate emoji and structure
+    """
+    if message_type == "agent_steps":
+        # Remove redundant [Agent Steps] prefix, add emoji
+        text = message_text.replace("[Agent Steps]", "").strip()
+        return f"🔄 Agent Steps\n{text}" if text else "🔄 Agent Steps"
+    elif message_type == "tool_invocation":
+        # Remove [Agent Steps] prefix if present, add hammer emoji
+        text = message_text.replace("[Agent Steps]", "").strip()
+        return f"🔨 Tool Invocation\n{text}"
+    elif message_type == "final_answer":
+        return f"✅ {message_text}"
+    else:
+        return f"📊 {message_text}"
+
+
 class LCAgentComponent(Component):
     trace_type = "agent"
+    
+    def __init__(self, *args, **kwargs):
+        """Initialize the agent component with progress message tracking."""
+        super().__init__(*args, **kwargs)
+        # Track message IDs by type for smart updates (replace mode)
+        self._progress_message_ids: dict[str, str] = {}
+    
     _base_inputs: list[InputTypes] = [
         MessageInput(
             name="input_value",
@@ -448,29 +513,84 @@ class LCToolsAgentComponent(LCAgentComponent):
                 tool.callbacks = callbacks_list
 
     async def _inject_progress_callback_into_tools(self) -> None:
-        """Inject progress callback into MCP tools so they can send progress updates to the UI."""
+        """Inject progress callback into MCP tools so they can send progress updates to the UI.
+        
+        This enhanced version includes:
+        - Message type detection (agent_steps, final_answer, tool_invocation, tool_progress)
+        - Message ID tracking for smart updates (replace mode)
+        - Improved message formatting with emojis
+        - Langflow-specific metadata (not sent over MCP)
+        """
         if not self.tools:
             return
 
         # Create a progress callback that sends messages to the UI
         async def agent_progress_callback(progress_data: dict) -> None:
-            """Forward progress notifications from MCP tools to the agent's UI."""
+            """Forward progress notifications from MCP tools to the agent's UI.
+            
+            Note: progress_data comes from MCP notification params (spec-compliant).
+            It contains: {"progress": 0.05, "total": 1.0, "message": "..."}
+            The message field is a custom extension compatible with the spec.
+            
+            This function adds Langflow-specific logic on top of MCP notifications:
+            - Detects message type from content
+            - Tracks message IDs for smart updates
+            - Adds metadata for UI rendering
+            - Formats messages with emojis
+            """
+            # Extract message from MCP params (spec-compliant)
             message_text = progress_data.get("message", "")
-            if message_text and hasattr(self, "send_message"):
-                from lfx.schema.message import Message
-                progress_message = Message(
-                    text=f"[Tool Progress] {message_text}",
-                    sender="Machine",
-                    sender_name="Agent Tool",
-                    session_id=getattr(self, "session_id", ""),
+            if not message_text or not hasattr(self, "send_message"):
+                return
+            
+            # OUR LOGIC: Detect message type from content (Langflow-specific)
+            message_type = _detect_message_type(message_text)
+            # Use replace mode for all message types to avoid duplicates
+            # The child agent may send multiple progress notifications with the same content
+            update_mode = "replace"
+            
+            # OUR LOGIC: Get or create message ID for this type (Langflow-specific)
+            # tool_progress and agent_steps share the same tracking ID so agent_steps can replace tool_progress
+            # tool_invocation gets its own tracking ID (separate from agent_steps)
+            # final_answer gets its own tracking ID
+            if message_type in ["tool_progress", "agent_steps"]:
+                tracking_key = "agent_progress"
+            else:
+                tracking_key = message_type
+            
+            if tracking_key not in self._progress_message_ids:
+                self._progress_message_ids[tracking_key] = str(uuid.uuid4())
+            
+            message_id = self._progress_message_ids[tracking_key]
+            
+            # OUR LOGIC: Format message based on type (Langflow-specific)
+            formatted_text = _format_progress_message(message_text, message_type)
+            
+            # Create Langflow Message with OUR metadata (not MCP)
+            from lfx.schema.message import Message
+            progress_message = Message(
+                text=formatted_text,
+                sender="Machine",
+                sender_name="Agent Tool",
+                session_id=getattr(self, "session_id", ""),
+            )
+            
+            # Store metadata as temporary attributes (not persisted to DB)
+            # These are used by send_message for smart update logic
+            progress_message._message_type = message_type  # type: ignore
+            progress_message._update_mode = update_mode  # type: ignore
+            progress_message._tracking_id = message_id  # type: ignore
+            progress_message._source = "mcp_tool"  # type: ignore
+            
+            try:
+                # Send to Langflow UI (not MCP)
+                await self.send_message(progress_message)
+                await logger.adebug(
+                    f"[AGENT PROGRESS] Sent progress message to UI: type={message_type}, "
+                    f"mode={update_mode}, id={message_id}, text={message_text[:100]}"
                 )
-                try:
-                    await self.send_message(progress_message)
-                    await logger.adebug(
-                        f"[AGENT PROGRESS] Sent progress message to UI: {message_text[:100]}"
-                    )
-                except Exception as e:
-                    await logger.awarning(f"[AGENT PROGRESS] Failed to send progress message: {e}")
+            except Exception as e:
+                await logger.awarning(f"[AGENT PROGRESS] Failed to send progress message: {e}")
 
         # Inject the callback into MCP tools
         for tool in self.tools:

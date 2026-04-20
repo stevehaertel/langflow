@@ -1664,6 +1664,41 @@ class Component(CustomComponent):
             )
             return message
 
+        # Phase 3: Handle replace mode for smart message updates
+        # Check if this is a replace-mode message (for progress notifications)
+        # We check for special metadata stored temporarily on the message object
+        update_mode = getattr(message, '_update_mode', None)
+        tracking_id = getattr(message, '_tracking_id', None)
+        
+        if update_mode == "replace" and tracking_id:
+            # Find existing message with this tracking ID and update it
+            existing_message = await self._find_message_by_tracking_id(tracking_id)
+            if existing_message:
+                print(
+                    "[COMPONENT DEBUG] send_message replace mode: "
+                    f"updating existing message with tracking_id={tracking_id!r}, "
+                    f"db_id={existing_message.get_id()!r}"
+                )
+                # Update existing message content
+                existing_message.text = message.text
+                
+                # Update in database
+                updated_message = await self._update_stored_message(existing_message)
+                # Update the cached message
+                if not hasattr(self, '_tracked_messages'):
+                    self._tracked_messages = {}
+                self._tracked_messages[tracking_id] = updated_message
+                # Send event to update UI
+                await self._send_message_event(updated_message, id_=str(updated_message.get_id()) if updated_message.get_id() else None)
+                return updated_message
+            else:
+                print(
+                    "[COMPONENT DEBUG] send_message replace mode: "
+                    f"no existing message found with tracking_id={tracking_id!r}, "
+                    f"creating new message"
+                )
+                # No existing message found, will store the tracking_id after creating the message below
+
         if hasattr(message, "flow_id") and isinstance(message.flow_id, str):
             message.flow_id = UUID(message.flow_id)
 
@@ -1715,6 +1750,17 @@ class Component(CustomComponent):
             # After _store_message, the message should always have an ID
             # but we use get_id() for safety
             self._stored_message_id = stored_message.get_id()
+            
+            # Phase 3: Cache the message object for replace mode
+            tracking_id = getattr(message, '_tracking_id', None)
+            if tracking_id:
+                if not hasattr(self, '_tracked_messages'):
+                    self._tracked_messages = {}
+                self._tracked_messages[tracking_id] = stored_message
+                print(
+                    "[COMPONENT DEBUG] Cached message for tracking_id: "
+                    f"tracking_id={tracking_id!r} -> db_id={self._stored_message_id!r}"
+                )
             try:
                 complete_message = ""
                 if (
@@ -1828,6 +1874,27 @@ class Component(CustomComponent):
             and stored_message.has_id()
             and not isinstance(original_message.text, str)
         )
+
+    async def _find_message_by_tracking_id(self, tracking_id: str) -> Message | None:
+        """Find an existing message by its tracking ID.
+        
+        This is used for replace mode in progress notifications to update
+        existing messages instead of creating duplicates.
+        
+        Since we can't reliably retrieve messages from the database by ID,
+        we store the full message object in memory for quick updates.
+        
+        Args:
+            tracking_id: The tracking ID for the message
+            
+        Returns:
+            The existing message if found, None otherwise
+        """
+        if not hasattr(self, '_tracked_messages'):
+            self._tracked_messages = {}
+        
+        # Return the cached message object if it exists
+        return self._tracked_messages.get(tracking_id)
 
     async def _update_stored_message(self, message: Message) -> Message:
         """Update the stored message."""
