@@ -155,25 +155,68 @@ async def aupdate_messages(messages: Message | list[Message]) -> list[Message]:
     if not isinstance(messages, list):
         messages = [messages]
 
+    # Keep track of original messages to preserve in-memory state like nested_blocks
+    original_messages = {msg.id: msg for msg in messages}
+
     async with session_scope() as session:
-        updated_messages: list[MessageTable] = []
+        updated_messages: list[Message] = []
         for message in messages:
+            # Debug: Check message before database operations
+            first_block_before = message.content_blocks[0] if message.content_blocks else None
+            nested_before = len(first_block_before.nested_blocks) if first_block_before and hasattr(first_block_before, 'nested_blocks') else 0
+            model_fields_set_before = first_block_before.model_fields_set if first_block_before and hasattr(first_block_before, 'model_fields_set') else set()
+
+            print(
+                f"[AUPDATE_MESSAGES DEBUG] BEFORE get from DB: "
+                f"message_id={message.id}, "
+                f"nested_count={nested_before}, "
+                f"model_fields_set={model_fields_set_before}, "
+                f"nested_in_fields_set={'nested_blocks' in model_fields_set_before}"
+            )
+
             msg = await session.get(MessageTable, message.id)
             if msg:
-                msg = msg.sqlmodel_update(message.model_dump(exclude_unset=True, exclude_none=True))
+                # Check what model_dump produces
+                dumped = message.model_dump(exclude_unset=False, exclude_none=True)
+                first_block_in_dump = dumped.get('content_blocks', [{}])[0] if dumped.get('content_blocks') else {}
+                nested_in_dump = len(first_block_in_dump.get('nested_blocks', [])) if 'nested_blocks' in first_block_in_dump else 0
+
+                print(
+                    f"[AUPDATE_MESSAGES DEBUG] After model_dump(exclude_unset=False): "
+                    f"nested_in_dump={nested_in_dump}, "
+                    f"has_nested_key={'nested_blocks' in first_block_in_dump}"
+                )
+
+                # IMPORTANT: Use exclude_unset=False to include nested_blocks even if not in model_fields_set
+                msg = msg.sqlmodel_update(dumped)
                 # Convert flow_id to UUID if it's a string preventing error when saving to database
                 if msg.flow_id and isinstance(msg.flow_id, str):
                     msg.flow_id = UUID(msg.flow_id)
                 result = session.add(msg)
                 if asyncio.iscoroutine(result):
                     await result
-                updated_messages.append(msg)
+                # IMPORTANT: Return the original message object to preserve in-memory state
+                # The database has been updated, but we return the original to keep nested_blocks
+                original_msg = original_messages[message.id]
+
+                # Debug: Verify the original message still has nested_blocks
+                first_block_after = original_msg.content_blocks[0] if original_msg.content_blocks else None
+                nested_after = len(first_block_after.nested_blocks) if first_block_after and hasattr(first_block_after, 'nested_blocks') else 0
+
+                print(
+                    f"[AUPDATE_MESSAGES DEBUG] Returning ORIGINAL message: "
+                    f"message_id={original_msg.id}, "
+                    f"nested_count={nested_after}, "
+                    f"same_object_as_input={original_msg is message}"
+                )
+
+                updated_messages.append(original_msg)
             else:
                 error_message = f"Message with id {message.id} not found"
                 await logger.awarning(error_message)
                 raise ValueError(error_message)
 
-        return [MessageRead.model_validate(message, from_attributes=True) for message in updated_messages]
+        return updated_messages
 
 
 async def aadd_messagetables(messages: list[MessageTable], session: AsyncSession, retry_count: int = 0):

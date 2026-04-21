@@ -283,7 +283,9 @@ class AgentComponent(ToolCallingAgentComponent):
             raise
         # Avoid catching blind Exception; let truly unexpected exceptions propagate
         except Exception as e:
+            import traceback
             await logger.aerror(f"Unexpected error: {e!s}")
+            await logger.aerror(f"Full traceback:\n{traceback.format_exc()}")
             raise
         else:
             return result

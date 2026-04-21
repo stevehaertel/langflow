@@ -31,18 +31,42 @@ export function useToolDurations(
   >({});
 
   // Extract tool items with unique keys
+  // Include blocks that have tool_use contents OR have nested_blocks
   const toolItems = useMemo(() => {
     if (!contentBlocks) return [];
-    return contentBlocks.flatMap((block, blockIndex) =>
-      block.contents
+    return contentBlocks.flatMap((block, blockIndex) => {
+      const toolUseContents = block.contents
         .filter((content) => content.type === "tool_use")
         .map((content, contentIndex) => ({
           content,
           toolKey: `${blockIndex}-${contentIndex}`,
           blockIndex,
           contentIndex,
-        })),
-    );
+        }));
+
+      // If block has nested_blocks but no tool_use contents, create a synthetic tool item
+      // so the block gets rendered and nested blocks are displayed
+      if (
+        toolUseContents.length === 0 &&
+        block.nested_blocks &&
+        block.nested_blocks.length > 0
+      ) {
+        // Use first content item (usually text) as placeholder
+        const firstContent = block.contents[0];
+        if (firstContent) {
+          return [
+            {
+              content: firstContent as ToolContent,
+              toolKey: `${blockIndex}-synthetic`,
+              blockIndex,
+              contentIndex: 0,
+            },
+          ];
+        }
+      }
+
+      return toolUseContents;
+    });
   }, [contentBlocks]);
 
   // Initialize elapsed times from completed tools (for old messages or when tools first load)

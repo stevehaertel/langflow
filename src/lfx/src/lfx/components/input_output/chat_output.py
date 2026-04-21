@@ -119,6 +119,23 @@ class ChatOutput(ChatComponent):
         # Create or use existing Message object
         if isinstance(self.input_value, Message) and not self.is_connected_to_chat_input():
             message = self.input_value
+
+            # NESTED NOTIFICATIONS FIX: If the message has an ID, fetch the latest version from DB
+            # to get any nested_blocks that were added during agent execution
+            message_id = message.get_id()
+            if message_id and hasattr(self, 'send_message'):
+                try:
+                    # Fetch latest version from database with nested_blocks
+                    latest_message = await self.send_message(message, skip_db_update=True)
+                    # Preserve the text we just converted
+                    latest_message.text = text
+                    message = latest_message
+                    self.log(f"[CHATOUTPUT DEBUG] Fetched latest message from DB: message_id={message_id}, nested_count={len(message.content_blocks[0].nested_blocks) if message.content_blocks and message.content_blocks[0].nested_blocks else 0}")
+                except Exception as e:
+                    self.log(f"[CHATOUTPUT DEBUG] Failed to fetch latest message from DB: {e}")
+                    # Continue with the message we have
+                    pass
+
             # Update message properties
             message.text = text
             # Preserve existing session_id from the incoming message if it exists

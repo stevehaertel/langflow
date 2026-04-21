@@ -75,6 +75,35 @@ class Message(Data):
     content_blocks: list[ContentBlock] = Field(default_factory=list)
     duration: int | None = None
 
+    # NEW FIELDS for nested notifications support
+    parent_message_id: UUID | None = Field(
+        default=None,
+        description="Link to parent message for nested notifications"
+    )
+    message_context: str | None = Field(
+        default=None,
+        description="Context type: 'tool_call', 'child_notification', etc."
+    )
+    tool_call_id: str | None = Field(
+        default=None,
+        description="Specific tool call this message relates to"
+    )
+
+    @field_validator("parent_message_id", mode="before")
+    @classmethod
+    def validate_parent_message_id(cls, value):
+        """Validate and convert parent_message_id to UUID."""
+        if value is None:
+            return None
+        if isinstance(value, UUID):
+            return value
+        if isinstance(value, str):
+            try:
+                return UUID(value)
+            except (ValueError, AttributeError):
+                return None
+        return None
+
     @field_validator("flow_id", mode="before")
     @classmethod
     def validate_flow_id(cls, value):
@@ -102,6 +131,13 @@ class Message(Data):
             value = Properties.model_validate_json(value)
         elif isinstance(value, dict):
             value = Properties.model_validate(value)
+        return value
+
+    @field_serializer("parent_message_id")
+    def serialize_parent_message_id(self, value):
+        """Serialize parent_message_id to string for JSON."""
+        if isinstance(value, UUID):
+            return str(value)
         return value
 
     @field_serializer("flow_id")
@@ -430,6 +466,11 @@ class MessageResponse(DefaultModel):
     properties: Properties | None = None
     category: str | None = None
     content_blocks: list[ContentBlock] | None = None
+
+    # Nested notification fields
+    parent_message_id: UUID | None = Field(default=None)
+    message_context: str | None = Field(default=None)
+    tool_call_id: str | None = Field(default=None)
 
     @field_validator("content_blocks", mode="before")
     @classmethod

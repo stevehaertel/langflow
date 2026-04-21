@@ -54,6 +54,18 @@ async def astore_message(
         # Since we're using NoopSession by default, this doesn't actually persist
         # but maintains the same interface as langflow.memory
         try:
+            # Debug: Check nested blocks before any operations
+            first_block_before = message.content_blocks[0] if message.content_blocks else None
+            nested_before = len(first_block_before.nested_blocks) if first_block_before and hasattr(first_block_before, 'nested_blocks') else 0
+            block_id_before = id(first_block_before) if first_block_before else None
+
+            print(
+                f"[ASTORE_MESSAGE DEBUG] BEFORE operations: "
+                f"message_id={message.get_id()!r}, "
+                f"nested_count={nested_before}, "
+                f"block_id={block_id_before}"
+            )
+
             # Generate an ID if not present
             if not hasattr(message, "id") or not message.id:
                 try:
@@ -68,6 +80,20 @@ async def astore_message(
 
             await session.add(message)
             await session.commit()
+
+            # Debug: Check nested blocks after operations
+            first_block_after = message.content_blocks[0] if message.content_blocks else None
+            nested_after = len(first_block_after.nested_blocks) if first_block_after and hasattr(first_block_after, 'nested_blocks') else 0
+            block_id_after = id(first_block_after) if first_block_after else None
+
+            print(
+                f"[ASTORE_MESSAGE DEBUG] AFTER operations: "
+                f"message_id={message.get_id()!r}, "
+                f"nested_count={nested_after}, "
+                f"block_id={block_id_after}, "
+                f"same_block_object={block_id_before == block_id_after}"
+            )
+
             logger.debug(f"Message stored with ID: {message.id}")
         except Exception as e:
             logger.exception(f"Error storing message: {e}")

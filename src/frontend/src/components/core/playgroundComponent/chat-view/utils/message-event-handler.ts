@@ -13,10 +13,23 @@ export const handleMessageEvent = (
 ): boolean => {
   switch (eventType) {
     case "add_message": {
+      // Cast to Message type
+      const message = data as Message;
+
+      // Lightweight logging - avoid expensive JSON.stringify
+      console.log("[MESSAGE_EVENT_HANDLER] add_message:", {
+        id: message.id,
+        contentBlocksCount: message.content_blocks?.length || 0,
+        hasNestedBlocks:
+          message.content_blocks?.some(
+            (b) => b.nested_blocks && b.nested_blocks.length > 0,
+          ) || false,
+      });
+
       // Update React Query cache (internal playground)
-      updateMessage(data as Message);
+      updateMessage(message);
       // Update Zustand store (shareable playground / IOModal)
-      useMessagesStore.getState().addMessage(data as Message);
+      useMessagesStore.getState().addMessage(message);
       return true;
     }
     case "token": {

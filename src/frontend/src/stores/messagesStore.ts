@@ -26,8 +26,31 @@ export const useMessagesStore = create<MessagesStoreType>((set, get) => ({
     set(() => ({ messages: messages }));
   },
   addMessage: (message) => {
+    // DEBUG: Log incoming message structure
+    console.log("[MESSAGES STORE DEBUG] addMessage called:", {
+      messageId: message.id,
+      sender: message.sender,
+      state: message.properties?.state,
+      contentBlocksCount: message.content_blocks?.length || 0,
+      contentBlocks:
+        message.content_blocks?.map((cb) => ({
+          title: cb.title,
+          contentsCount: cb.contents?.length || 0,
+          hasNestedBlocks: !!(cb.nested_blocks && cb.nested_blocks.length > 0),
+          nestedBlocksCount: cb.nested_blocks?.length || 0,
+          nestedBlockTitles: cb.nested_blocks?.map((nb) => nb.title) || [],
+        })) || [],
+    });
+
     const existingMessage = get().messages.find((msg) => msg.id === message.id);
     if (existingMessage) {
+      console.log("[MESSAGES STORE DEBUG] Message exists, updating:", {
+        messageId: message.id,
+        isPartial: message.properties?.state === "partial",
+        existingContentBlocks: existingMessage.content_blocks?.length || 0,
+        newContentBlocks: message.content_blocks?.length || 0,
+      });
+
       // Check if this is a streaming partial message (state: "partial")
       if (message.properties?.state === "partial") {
         // For streaming, accumulate the text content
@@ -41,6 +64,8 @@ export const useMessagesStore = create<MessagesStoreType>((set, get) => ({
       }
       return;
     }
+
+    console.log("[MESSAGES STORE DEBUG] New message, adding to store");
     if (message.sender === "Machine") {
       set(() => ({ displayLoadingMessage: false }));
     }
@@ -52,20 +77,60 @@ export const useMessagesStore = create<MessagesStoreType>((set, get) => ({
     }));
   },
   updateMessage: (message) => {
+    console.log("[MESSAGES STORE DEBUG] updateMessage called:", {
+      messageId: message.id,
+      contentBlocksCount: message.content_blocks?.length || 0,
+      firstBlockNestedCount:
+        message.content_blocks?.[0]?.nested_blocks?.length || 0,
+    });
+
     set(() => ({
-      messages: get().messages.map((msg) =>
-        msg.id === message.id ? message : msg,
-      ),
+      messages: get().messages.map((msg) => {
+        if (msg.id === message.id) {
+          console.log("[MESSAGES STORE DEBUG] Replacing message:", {
+            oldContentBlocks: msg.content_blocks?.length || 0,
+            newContentBlocks: message.content_blocks?.length || 0,
+            oldFirstBlockNested:
+              msg.content_blocks?.[0]?.nested_blocks?.length || 0,
+            newFirstBlockNested:
+              message.content_blocks?.[0]?.nested_blocks?.length || 0,
+          });
+          return message;
+        }
+        return msg;
+      }),
     }));
   },
   updateMessagePartial: (message) => {
+    console.log("[MESSAGES STORE DEBUG] updateMessagePartial called:", {
+      messageId: message.id,
+      contentBlocksCount: message.content_blocks?.length || 0,
+      firstBlockNestedCount:
+        message.content_blocks?.[0]?.nested_blocks?.length || 0,
+    });
+
     // search for the message and update it
     // look for the message list backwards to find the message faster
     set((state) => {
       const updatedMessages = [...state.messages];
       for (let i = state.messages.length - 1; i >= 0; i--) {
         if (state.messages[i].id === message.id) {
-          updatedMessages[i] = { ...updatedMessages[i], ...message };
+          const oldMsg = updatedMessages[i];
+          const newMsg = { ...oldMsg, ...message };
+
+          console.log("[MESSAGES STORE DEBUG] Partial update merging:", {
+            oldContentBlocks: oldMsg.content_blocks?.length || 0,
+            newContentBlocks: message.content_blocks?.length || 0,
+            mergedContentBlocks: newMsg.content_blocks?.length || 0,
+            oldFirstBlockNested:
+              oldMsg.content_blocks?.[0]?.nested_blocks?.length || 0,
+            newFirstBlockNested:
+              message.content_blocks?.[0]?.nested_blocks?.length || 0,
+            mergedFirstBlockNested:
+              newMsg.content_blocks?.[0]?.nested_blocks?.length || 0,
+          });
+
+          updatedMessages[i] = newMsg;
           break;
         }
       }

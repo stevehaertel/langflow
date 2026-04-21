@@ -422,9 +422,46 @@ async def process_agent_events(
                         event, agent_message, send_message_callback, None, start_time, had_streaming=had_streaming
                     )
 
+        # Before marking as complete, fetch the latest message from DB to get any nested_blocks
+        # that were added during tool execution (e.g., from child flows via MCP progress notifications)
+        # The send_message_callback with skip_db_update=True returns the updated message from DB
+        message_id = agent_message.get_id()
+        if message_id:
+            # Fetch latest version by calling send_message_callback with skip_db_update=True
+            # This will return the message from DB with any nested_blocks that were added
+            try:
+                latest_agent_message = await send_message_callback(message=agent_message, skip_db_update=True)
+                # Preserve the text from our local version (which has the final answer)
+                latest_agent_message.text = agent_message.text
+
+                # CRITICAL FIX: Merge content_blocks to preserve both nested_blocks (from DB)
+                # and tool_use contents (from local processing)
+                if agent_message.content_blocks and latest_agent_message.content_blocks:
+                    # The local version has the most up-to-date contents (tool_use, etc.)
+                    # The DB version has the nested_blocks that were added by child notifications
+                    # We need to merge them: use local contents but preserve DB nested_blocks
+                    for i, local_block in enumerate(agent_message.content_blocks):
+                        if i < len(latest_agent_message.content_blocks):
+                            db_block = latest_agent_message.content_blocks[i]
+                            # Preserve nested_blocks from DB version
+                            if hasattr(db_block, 'nested_blocks') and db_block.nested_blocks:
+                                local_block.nested_blocks = db_block.nested_blocks
+                                # Mark as explicitly set for serialization
+                                if hasattr(local_block, 'model_fields_set'):
+                                    local_block.model_fields_set.add('nested_blocks')
+                    # Use the local version with merged nested_blocks
+                    latest_agent_message.content_blocks = agent_message.content_blocks
+
+                agent_message = latest_agent_message
+            except Exception:
+                # If fetch fails, continue with local message
+                pass
+
         agent_message.properties.state = "complete"
         # Final DB update with the complete message (skip_db_update=False by default)
         agent_message = await send_message_callback(message=agent_message)
     except Exception as e:
         raise ExceptionWithMessageError(agent_message, str(e)) from e
-    return await Message.create(**agent_message.model_dump())
+    # Return the agent_message directly to preserve nested_blocks
+    # Creating a new Message from model_dump() would lose the in-memory nested_blocks
+    return agent_message

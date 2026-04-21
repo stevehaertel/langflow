@@ -35,12 +35,16 @@ class ContentBlock(BaseModel):
     def __init__(self, **data) -> None:
         super().__init__(**data)
         schema_dict = self.__pydantic_core_schema__["schema"]
+        fields = None
         if "fields" in schema_dict:
             fields = schema_dict["fields"]
         elif "schema" in schema_dict:
             fields = schema_dict["schema"]["fields"]
-        fields_with_default = (f for f, d in fields.items() if "default" in d["schema"])
-        self.model_fields_set.update(fields_with_default)
+
+        # Only update model_fields_set if fields were found
+        if fields:
+            fields_with_default = (f for f, d in fields.items() if "default" in d["schema"])
+            self.model_fields_set.update(fields_with_default)
 
     @field_validator("contents", mode="before")
     @classmethod

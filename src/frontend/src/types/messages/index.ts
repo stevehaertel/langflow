@@ -31,6 +31,10 @@ type Message = {
     [key: string]: unknown;
   };
   content_blocks?: ContentBlock[];
+  // Parent-child relationship fields for nested notifications
+  parent_message_id?: string | null;
+  message_context?: string | null;
+  tool_call_id?: string | null;
 };
 
 export type { Message };

@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING, Annotated
 from uuid import UUID, uuid4
 
 from pydantic import ConfigDict, field_serializer, field_validator
-from sqlalchemy import Text
-from sqlmodel import JSON, Column, Field, SQLModel
+from sqlalchemy import ForeignKey, String, Text
+from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
 from langflow.schema.content_block import ContentBlock
 from langflow.schema.properties import Properties
@@ -32,6 +32,11 @@ class MessageBase(SQLModel):
     properties: Properties = Field(default_factory=Properties)
     category: str = Field(default="message")
     content_blocks: list[ContentBlock] = Field(default_factory=list)
+
+    # Nested notification fields
+    parent_message_id: UUID | None = Field(default=None)
+    message_context: str | None = Field(default=None)
+    tool_call_id: str | None = Field(default=None)
 
     @field_serializer("timestamp")
     def serialize_timestamp(self, value):
@@ -148,9 +153,28 @@ class MessageTable(MessageBase, table=True):  # type: ignore[call-arg]
         sa_column=Column(JSON),
     )
 
-    @field_validator("flow_id", mode="before")
+    # Override parent_message_id to add foreign key
+    # Use String(36) for SQLite compatibility (stores UUID as string)
+    parent_message_id: UUID | None = Field(
+        default=None,
+        sa_column=Column(String(36), ForeignKey("message.id", ondelete="CASCADE"), nullable=True, index=True),
+    )
+
+    # Override message_context to add column type
+    message_context: str | None = Field(
+        default=None,
+        sa_column=Column(String(100), nullable=True),
+    )
+
+    # Override tool_call_id to add index
+    tool_call_id: str | None = Field(
+        default=None,
+        sa_column=Column(String(100), nullable=True, index=True),
+    )
+
+    @field_validator("flow_id", "parent_message_id", mode="before")
     @classmethod
-    def validate_flow_id(cls, value):
+    def validate_uuid_fields(cls, value):
         if value is None:
             return value
         if isinstance(value, str):
@@ -219,3 +243,8 @@ class MessageUpdate(SQLModel):
     edit: bool | None = None
     error: bool | None = None
     properties: Properties | None = None
+
+    # Nested notification fields
+    parent_message_id: UUID | None = None
+    message_context: str | None = None
+    tool_call_id: str | None = None

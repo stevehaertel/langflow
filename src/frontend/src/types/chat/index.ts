@@ -135,13 +135,19 @@ export type ContentType =
   | CodeContent
   | ToolContent;
 
-// Updated ContentBlock interface
+// Updated ContentBlock interface with nested block support
 export interface ContentBlock {
   title: string;
   contents: ContentType[];
   allow_markdown: boolean;
   media_url?: string[];
   component: string;
+  // Nested block fields for hierarchical structure
+  nested_blocks?: ContentBlock[];
+  block_type?: string;
+  is_expandable?: boolean;
+  is_expanded?: boolean;
+  nesting_depth?: number;
 }
 
 export interface PlaygroundEvent {

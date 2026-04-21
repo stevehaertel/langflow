@@ -30,6 +30,16 @@ const findMessageContext = (
 };
 
 export const updateMessage = (updatedMessage: Message) => {
+  // Lightweight logging - avoid expensive operations
+  console.log("[MESSAGE_UTILS] updateMessage:", {
+    id: updatedMessage.id,
+    contentBlocksCount: updatedMessage.content_blocks?.length || 0,
+    hasNestedBlocks:
+      updatedMessage.content_blocks?.some(
+        (b) => b.nested_blocks && b.nested_blocks.length > 0,
+      ) || false,
+  });
+
   // For streaming tokens, if flow_id/session_id are missing, try to find from existing message
   let flowId = updatedMessage.flow_id;
   let sessionId = updatedMessage.session_id;
@@ -68,6 +78,7 @@ export const updateMessage = (updatedMessage: Message) => {
   // Update the cache directly
   queryClient.setQueryData(cacheKey, (old: Message[] = []) => {
     const newMessage = { ...updatedMessage };
+
     const isStreamingToken = newMessage.properties?.state === "partial";
 
     // Find existing message

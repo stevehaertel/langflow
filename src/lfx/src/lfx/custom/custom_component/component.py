@@ -1669,7 +1669,7 @@ class Component(CustomComponent):
         # We check for special metadata stored temporarily on the message object
         update_mode = getattr(message, '_update_mode', None)
         tracking_id = getattr(message, '_tracking_id', None)
-        
+
         if update_mode == "replace" and tracking_id:
             # Find existing message with this tracking ID and update it
             existing_message = await self._find_message_by_tracking_id(tracking_id)
@@ -1681,7 +1681,7 @@ class Component(CustomComponent):
                 )
                 # Update existing message content
                 existing_message.text = message.text
-                
+
                 # Update in database
                 updated_message = await self._update_stored_message(existing_message)
                 # Update the cached message
@@ -1725,14 +1725,57 @@ class Component(CustomComponent):
                 )
                 raise ValueError(msg)
 
-            # Create a fresh Message instance for consistency with normal flow
-            stored_message = await Message.create(**message.model_dump())
+            # CRITICAL FIX: Fetch the latest message from DB to preserve nested_blocks
+            # that may have been added by child flows via MCP progress notifications
+            # Use aupdate_messages which fetches from DB when message has an ID
+            try:
+                # aupdate_messages will fetch from DB and return the stored version
+                # This preserves nested_blocks that were added by child notifications
+                updated_messages = await aupdate_messages(message)
+                if updated_messages:
+                    stored_message = updated_messages[0]
+                else:
+                    stored_message = message
+            except Exception as e:
+                print(f"[COMPONENT DEBUG] Failed to fetch from DB via aupdate_messages: {e}")
+                stored_message = message
+
+            if stored_message != message:
+                # Successfully fetched from DB, now merge
+
+                # Update the stored message with any new content from the local message
+                # but preserve nested_blocks from the DB version
+                stored_message.text = message.text
+                if hasattr(message, 'properties'):
+                    stored_message.properties = message.properties
+                if hasattr(message, 'content_blocks') and message.content_blocks:
+                    # Merge content_blocks: use local contents but preserve DB nested_blocks
+                    for i, local_block in enumerate(message.content_blocks):
+                        if i < len(stored_message.content_blocks):
+                            db_block = stored_message.content_blocks[i]
+                            # Preserve nested_blocks from DB
+                            if hasattr(db_block, 'nested_blocks') and db_block.nested_blocks:
+                                local_block.nested_blocks = db_block.nested_blocks
+                                if hasattr(local_block, 'model_fields_set'):
+                                    local_block.model_fields_set.add('nested_blocks')
+                    stored_message.content_blocks = message.content_blocks
+
+                print(
+                    "[COMPONENT DEBUG] send_message fetched from DB and merged: "
+                    f"stored_message_id={stored_message.get_id()!r}, "
+                    f"state={getattr(getattr(stored_message, 'properties', None), 'state', None)!r}, "
+                    f"nested_blocks_count={len(stored_message.content_blocks[0].nested_blocks) if stored_message.content_blocks and hasattr(stored_message.content_blocks[0], 'nested_blocks') else 0}"
+                )
+            else:
+                # Fallback: if DB fetch fails, use the local message
+                # This shouldn't happen but provides safety
+                stored_message = message
+                print(
+                    "[COMPONENT DEBUG] send_message DB fetch failed, using local message: "
+                    f"message_id={message.get_id()!r}"
+                )
+
             self._stored_message_id = stored_message.get_id()
-            print(
-                "[COMPONENT DEBUG] send_message created in-memory stored_message: "
-                f"stored_message_id={stored_message.get_id()!r}, "
-                f"state={getattr(getattr(stored_message, 'properties', None), 'state', None)!r}"
-            )
             # Still send the event to update the client in real-time
             # Note: If this fails, we don't need DB cleanup since we didn't write to DB
             await self._send_message_event(stored_message, id_=id_)
@@ -1750,7 +1793,7 @@ class Component(CustomComponent):
             # After _store_message, the message should always have an ID
             # but we use get_id() for safety
             self._stored_message_id = stored_message.get_id()
-            
+
             # Phase 3: Cache the message object for replace mode
             tracking_id = getattr(message, '_tracking_id', None)
             if tracking_id:
@@ -1795,6 +1838,11 @@ class Component(CustomComponent):
         return stored_message
 
     async def _store_message(self, message: Message) -> Message:
+        # Debug: Check message when it arrives at _store_message
+        first_block_before = message.content_blocks[0] if message.content_blocks else None
+        nested_count_on_arrival = len(first_block_before.nested_blocks) if first_block_before and hasattr(first_block_before, 'nested_blocks') else 0
+        first_block_id_before = id(first_block_before) if first_block_before else None
+
         flow_id: str | None = None
         if hasattr(self, "graph"):
             # Convert UUID to str if needed
@@ -1804,24 +1852,85 @@ class Component(CustomComponent):
             f"component_id={getattr(self, '_id', None)!r}, "
             f"flow_id={flow_id!r}, "
             f"message_id={message.get_id()!r}, "
-            f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}"
+            f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}, "
+            f"nested_count_on_arrival={nested_count_on_arrival}, "
+            f"first_block_id_before={first_block_id_before}"
         )
         stored_messages = await astore_message(message, flow_id=flow_id)
+
+        # Check if the ContentBlock object changed
+        first_block_after = stored_messages[0].content_blocks[0] if stored_messages[0].content_blocks else None
+        first_block_id_after = id(first_block_after) if first_block_after else None
+        nested_count_after_astore = len(first_block_after.nested_blocks) if first_block_after and hasattr(first_block_after, 'nested_blocks') else 0
+
+        print(
+            "[COMPONENT DEBUG] _store_message after astore_message - object identity check: "
+            f"first_block_id_before={first_block_id_before}, "
+            f"first_block_id_after={first_block_id_after}, "
+            f"same_object={first_block_id_before == first_block_id_after}, "
+            f"nested_count_before={nested_count_on_arrival}, "
+            f"nested_count_after={nested_count_after_astore}"
+        )
+
+        # Debug: Check nested blocks before and after model_dump
+        stored_message = stored_messages[0]
+
+        # Check if stored_message has content_blocks
+        has_content_blocks = hasattr(stored_message, 'content_blocks') and stored_message.content_blocks
+        nested_count_before = 0
+        if has_content_blocks and len(stored_message.content_blocks) > 0:
+            first_block = stored_message.content_blocks[0]
+            if hasattr(first_block, 'nested_blocks'):
+                nested_count_before = len(first_block.nested_blocks or [])
+
+        # Now dump and check again
+        dumped_data = stored_message.model_dump()
+        nested_count_after = 0
+        first_block_has_nested_key = False
+        if dumped_data.get('content_blocks') and len(dumped_data['content_blocks']) > 0:
+            first_block_dict = dumped_data['content_blocks'][0]
+            first_block_has_nested_key = 'nested_blocks' in first_block_dict
+            if first_block_has_nested_key:
+                nested_count_after = len(first_block_dict.get('nested_blocks', []) or [])
+
         print(
             "[COMPONENT DEBUG] _store_message after astore_message: "
             f"stored_count={len(stored_messages)!r}, "
-            f"stored_ids={[getattr(item, 'id', None) for item in stored_messages]!r}"
+            f"stored_ids={[getattr(item, 'id', None) for item in stored_messages]!r}, "
+            f"has_content_blocks={has_content_blocks}, "
+            f"nested_blocks_before_dump={nested_count_before}, "
+            f"nested_blocks_after_dump={nested_count_after}, "
+            f"first_block_has_nested_key={first_block_has_nested_key}, "
+            f"dumped_keys={list(dumped_data.keys())}, "
+            f"first_block_keys={list(dumped_data.get('content_blocks', [{}])[0].keys()) if dumped_data.get('content_blocks') else []}"
         )
+
         if len(stored_messages) != 1:
             msg = "Only one message can be stored at a time."
             raise ValueError(msg)
-        stored_message = stored_messages[0]
-        return await Message.create(**stored_message.model_dump())
+
+        # IMPORTANT: Return the stored_message directly to preserve nested_blocks
+        # Creating a new Message from dumped_data would lose the in-memory nested_blocks
+        # that were preserved by astore_message -> aupdate_messages
+        return stored_messages[0]
 
     async def _send_message_event(self, message: Message, id_: str | None = None, category: str | None = None) -> None:
         if hasattr(self, "_event_manager") and self._event_manager:
             # Use full model_dump() to include all Message fields (content_blocks, properties, etc.)
             data_dict = message.model_dump()
+
+            # Debug: Check if nested_blocks made it into data_dict
+            nested_in_dump = []
+            if data_dict.get('content_blocks'):
+                for i, cb_dict in enumerate(data_dict['content_blocks']):
+                    if 'nested_blocks' in cb_dict and cb_dict['nested_blocks']:
+                        nested_in_dump.append(f"block{i}:{len(cb_dict['nested_blocks'])}")
+
+            print(
+                "[SEND_EVENT DEBUG] After model_dump(exclude_unset=False): "
+                f"nested_blocks_in_dump={nested_in_dump!r}, "
+                f"content_blocks_count={len(data_dict.get('content_blocks', []))}"
+            )
 
             # The message ID is stored in message.data["id"], which ends up in data_dict["data"]["id"]
             # But the frontend expects it at data_dict["id"], so we need to copy it to the top level
@@ -1831,6 +1940,14 @@ class Component(CustomComponent):
 
             category = category or data_dict.get("category", None)
 
+            # Log nested blocks info for debugging
+            content_blocks = getattr(message, 'content_blocks', []) or []
+            nested_blocks_info = []
+            for cb in content_blocks:
+                nested_count = len(getattr(cb, 'nested_blocks', []) or [])
+                if nested_count > 0:
+                    nested_blocks_info.append(f"{cb.title}:{nested_count}")
+
             print(
                 "[COMPONENT DEBUG] _send_message_event preparing event: "
                 f"component_id={getattr(self, '_id', None)!r}, "
@@ -1839,7 +1956,8 @@ class Component(CustomComponent):
                 f"resolved_message_id={message_id!r}, "
                 f"event_manager_present={bool(getattr(self, '_event_manager', None))!r}, "
                 f"state={getattr(getattr(message, 'properties', None), 'state', None)!r}, "
-                f"content_blocks_count={len(getattr(message, 'content_blocks', []) or [])!r}, "
+                f"content_blocks_count={len(content_blocks)!r}, "
+                f"nested_blocks_summary={nested_blocks_info!r}, "
                 f"text_preview={((message.text[:120] + '...') if isinstance(message.text, str) and len(message.text) > 120 else message.text)!r}"
             )
 
@@ -1877,22 +1995,22 @@ class Component(CustomComponent):
 
     async def _find_message_by_tracking_id(self, tracking_id: str) -> Message | None:
         """Find an existing message by its tracking ID.
-        
+
         This is used for replace mode in progress notifications to update
         existing messages instead of creating duplicates.
-        
+
         Since we can't reliably retrieve messages from the database by ID,
         we store the full message object in memory for quick updates.
-        
+
         Args:
             tracking_id: The tracking ID for the message
-            
+
         Returns:
             The existing message if found, None otherwise
         """
         if not hasattr(self, '_tracked_messages'):
             self._tracked_messages = {}
-        
+
         # Return the cached message object if it exists
         return self._tracked_messages.get(tracking_id)
 
