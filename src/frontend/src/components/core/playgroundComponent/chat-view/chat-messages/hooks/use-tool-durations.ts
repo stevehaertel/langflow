@@ -32,13 +32,19 @@ export function useToolDurations(
 
   // Extract tool items with unique keys
   // Include blocks that have tool_use contents OR have nested_blocks
+  // Filter out INPUT and OUTPUT tool_use items
   const toolItems = useMemo(() => {
     if (!contentBlocks) return [];
     return contentBlocks.flatMap((block, blockIndex) => {
       const toolUseContents = block.contents
-        .filter((content) => content.type === "tool_use")
+        .filter((content) => {
+          if (content.type !== "tool_use") return false;
+          // Filter out INPUT and OUTPUT tools
+          const toolName = (content as ToolContent).name?.toUpperCase() || "";
+          return toolName !== "INPUT" && toolName !== "OUTPUT";
+        })
         .map((content, contentIndex) => ({
-          content,
+          content: content as ToolContent,
           toolKey: `${blockIndex}-${contentIndex}`,
           blockIndex,
           contentIndex,

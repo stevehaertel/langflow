@@ -1,7 +1,8 @@
 "use client";
+// Cache bust: v2024-04-21-filter-fix
 import { motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BorderTrail } from "@/components/core/border-trail";
 import { useToolDurations } from "@/components/core/playgroundComponent/chat-view/chat-messages/hooks/use-tool-durations";
 import {
@@ -83,15 +84,56 @@ function NestedBlockRenderer({
     });
 
     const items = block.nested_blocks.flatMap((nestedBlock, nestedIndex) => {
+      console.log("[NESTED BLOCK PROCESSING] Processing nested block:", {
+        nestedIndex,
+        nestedBlockTitle: nestedBlock.title,
+        nestedBlockType: nestedBlock.block_type,
+        contentsCount: nestedBlock.contents.length,
+        contents: nestedBlock.contents.map((c, idx) => ({
+          index: idx,
+          type: c.type,
+          name: c.type === "tool_use" ? c.name : "N/A",
+        })),
+      });
+
       const toolUseContents = nestedBlock.contents
-        .filter((content) => content.type === "tool_use")
-        .map((content, contentIndex) => ({
-          content,
-          toolKey: `${toolKey}-nested-${nestedIndex}-${contentIndex}`,
-          blockIndex: nestedIndex,
-          contentIndex,
-          nestedBlock,
-        }));
+        .filter((content) => {
+          const isToolUse = content.type === "tool_use";
+          console.log(
+            "[NESTED BLOCK PROCESSING] Examining content for tool_use:",
+            {
+              nestedBlockTitle: nestedBlock.title,
+              contentType: content.type,
+              isToolUse,
+              toolName: isToolUse ? content.name : "N/A",
+            },
+          );
+          return isToolUse;
+        })
+        .map((content, contentIndex) => {
+          console.log(
+            "[NESTED BLOCK PROCESSING] Creating tool item from nested block content:",
+            {
+              nestedBlockTitle: nestedBlock.title,
+              toolName: content.name,
+              contentIndex,
+              toolKey: `${toolKey}-nested-${nestedIndex}-${contentIndex}`,
+            },
+          );
+          return {
+            content,
+            toolKey: `${toolKey}-nested-${nestedIndex}-${contentIndex}`,
+            blockIndex: nestedIndex,
+            contentIndex,
+            nestedBlock,
+          };
+        });
+
+      console.log("[NESTED BLOCK PROCESSING] Tool use contents extracted:", {
+        nestedBlockTitle: nestedBlock.title,
+        toolUseCount: toolUseContents.length,
+        toolNames: toolUseContents.map((t) => t.content.name),
+      });
 
       // If nested block has no tool_use contents but has content or further nested blocks,
       // create a synthetic item so it gets rendered
@@ -136,9 +178,42 @@ function NestedBlockRenderer({
   return (
     <div className={cn("relative", indentClass)}>
       {block.contents
-        .filter(
-          (content) => content.type === "tool_use" || content.type === "text",
-        )
+        .filter((content, contentIndex) => {
+          // Log EVERY content item that comes through
+          console.log("[ContentBlockDisplay] Processing content item:", {
+            blockTitle: block.title,
+            contentIndex,
+            contentType: content.type,
+            contentName: content.type === "tool_use" ? content.name : "N/A",
+            hasHeader: !!content.header,
+            headerTitle: content.header?.title || "N/A",
+          });
+
+          // Filter out INPUT and OUTPUT tool calls by name
+          if (content.type === "tool_use") {
+            const toolName = content.name?.toUpperCase() || "";
+            const shouldFilter = toolName === "INPUT" || toolName === "OUTPUT";
+            console.log("[ContentBlockDisplay] tool_use decision:", {
+              name: content.name,
+              toolName,
+              shouldFilter,
+              willKeep: !shouldFilter,
+            });
+            if (shouldFilter) {
+              return false;
+            }
+            return true;
+          }
+          // Also accept text content for nested notifications
+          if (content.type === "text") {
+            console.log("[ContentBlockDisplay] Keeping text content");
+            return true;
+          }
+          console.log(
+            "[ContentBlockDisplay] Filtering out non-tool_use/non-text content",
+          );
+          return false;
+        })
         .map((content, contentIndex) => {
           const currentToolKey = `${toolKey}-${contentIndex}`;
           const rawTitle =
@@ -225,6 +300,34 @@ export function ContentBlockDisplay({
 }: ContentBlockDisplayProps) {
   const [isExpanded, setIsExpanded] = useState(false);
 
+  // Hide INPUT and OUTPUT accordions for demo
+  useEffect(() => {
+    const hideInputOutputAccordions = () => {
+      // Find all accordion items with tool names
+      const accordionItems = document.querySelectorAll(".mb-2");
+      accordionItems.forEach((item) => {
+        const toolNameElement = item.querySelector(
+          "p.truncate.font-normal.font-mono",
+        );
+        if (toolNameElement) {
+          const toolName = toolNameElement.textContent?.trim().toUpperCase();
+          if (toolName === "INPUT" || toolName === "OUTPUT") {
+            (item as HTMLElement).classList.add("hide-input-output-accordion");
+            console.log(
+              `[ContentBlockDisplay] Hiding ${toolName} accordion via CSS`,
+            );
+          }
+        }
+      });
+    };
+
+    // Run immediately and after a short delay to catch dynamically rendered content
+    hideInputOutputAccordions();
+    const timer = setTimeout(hideInputOutputAccordions, 100);
+
+    return () => clearTimeout(timer);
+  }, [contentBlocks, isLoading]);
+
   // DEBUG: Log incoming content blocks
   console.log("[CONTENT BLOCK DISPLAY DEBUG] Component rendered:", {
     contentBlocksCount: contentBlocks?.length || 0,
@@ -243,7 +346,7 @@ export function ContentBlockDisplay({
     })),
   });
 
-  // Use shared hook for tool duration tracking
+  // Use shared hook for tool duration tracking with ALL blocks (don't filter here)
   const { toolElapsedTimes, toolItems } = useToolDurations(
     contentBlocks,
     isLoading ?? false,
@@ -279,6 +382,17 @@ export function ContentBlockDisplay({
 
   return (
     <div className="relative py-3">
+      {/* CSS to hide INPUT and OUTPUT accordions for demo */}
+      <style>{`
+        /* Hide accordion items that contain INPUT or OUTPUT in their tool name */
+        .mb-2:has(p.truncate.font-normal.font-mono) {
+          display: block;
+        }
+        /* Use JavaScript to hide - add class via useEffect */
+        .hide-input-output-accordion {
+          display: none !important;
+        }
+      `}</style>
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -339,18 +453,54 @@ export function ContentBlockDisplay({
               type="multiple"
               className="w-full bg-transparent flex flex-col gap-2"
             >
-              {contentBlocks.map((block, blockIndex) => (
-                <NestedBlockRenderer
-                  key={`block-${blockIndex}`}
-                  block={block}
-                  blockIndex={blockIndex}
-                  toolKey={`${blockIndex}`}
-                  toolElapsedTimes={toolElapsedTimes}
-                  chatId={chatId}
-                  playgroundPage={playgroundPage}
-                  depth={0}
-                />
-              ))}
+              {contentBlocks
+                .filter((block, blockIndex) => {
+                  // Log EVERY block before filtering
+                  console.log(
+                    "[ContentBlockDisplay] BLOCK-LEVEL filter - examining block:",
+                    {
+                      blockIndex,
+                      blockTitle: block.title,
+                      blockType: block.block_type,
+                      contentsCount: block.contents?.length || 0,
+                      hasNestedBlocks: !!(
+                        block.nested_blocks && block.nested_blocks.length > 0
+                      ),
+                      nestedBlocksCount: block.nested_blocks?.length || 0,
+                      chatId,
+                    },
+                  );
+
+                  // Filter out INPUT and OUTPUT blocks when rendering (v2)
+                  const blockTitle = block.title?.toUpperCase() || "";
+                  const shouldFilter =
+                    blockTitle === "INPUT" || blockTitle === "OUTPUT";
+
+                  console.log(
+                    "[ContentBlockDisplay] BLOCK-LEVEL filter decision:",
+                    {
+                      blockIndex,
+                      title: block.title,
+                      blockTitle,
+                      shouldFilter,
+                      willKeep: !shouldFilter,
+                    },
+                  );
+
+                  return !shouldFilter;
+                })
+                .map((block, blockIndex) => (
+                  <NestedBlockRenderer
+                    key={`block-${blockIndex}`}
+                    block={block}
+                    blockIndex={blockIndex}
+                    toolKey={`${blockIndex}`}
+                    toolElapsedTimes={toolElapsedTimes}
+                    chatId={chatId}
+                    playgroundPage={playgroundPage}
+                    depth={0}
+                  />
+                ))}
             </Accordion>
           </div>
         )}
