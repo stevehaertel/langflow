@@ -783,8 +783,8 @@ async def install_mcp_config(
             # For non-OAuth (API key or no auth), use mcp-proxy
             streamable_http_url = await get_project_streamable_http_url(project_id)
             legacy_sse_url = await get_project_sse_url(project_id)
-            command = "~/mcp-proxy/.venv/bin/python"
-            args = ["-m", "mcp_proxy"]
+            command = "uvx"
+            args = ["mcp-proxy"]
             # Check if we need to add Langflow API key headers
             # Necessary only when Project API Key Authentication is enabled
 
